@@ -1,0 +1,121 @@
+.dsh-codex-budget {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: 1.6;
+}
+
+.dsh-codex-budget-summary {
+  margin-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-codex-budget-body {
+  margin: 4px 0 8px 22px;
+  padding: 4px 0 4px 16px;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+}
+
+.dsh-codex-budget-note {
+  margin: 0 0 12px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.dsh-codex-budget-metrics {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsh-codex-budget-metrics > div {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.dsh-codex-budget-metrics dt {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-codex-budget-metrics dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.dsh-codex-budget-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin-bottom: 12px;
+}
+
+.dsh-codex-budget-tools > span {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dsh-codex-budget-tools > span > span,
+.dsh-codex-budget-seq {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-codex-budget code {
+  font-family: var(--dsw-font-family-mono, monospace);
+  font-size: inherit;
+}
+
+.dsh-codex-budget-records {
+  margin: 4px 0 0 22px;
+}
+
+.dsh-codex-budget-list {
+  max-height: 280px;
+  overflow: auto;
+}
+
+.dsh-codex-budget-record {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.dsh-codex-budget-record code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-codex-budget-original {
+  margin-top: 12px;
+}
+
+.dsh-codex-budget-original pre {
+  max-height: 400px;
+  margin: 4px 0;
+  padding: 12px 16px;
+  overflow: auto;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-markdown-code-block);
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-markdown-code-block-small);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .dsh-codex-budget-body {
+    margin-left: 6px;
+    padding-left: 10px;
+  }
+
+  .dsh-codex-budget-record {
+    gap: 6px;
+  }
+}

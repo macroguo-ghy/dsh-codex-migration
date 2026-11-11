@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+bin=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+real_dsh=$(PATH="${PATH#"$bin:"}" command -v dsh)
+if [ "$real_dsh" = "$bin/dsh" ]; then
+  printf '%s\n' '请将续聊启动器目录放在 PATH 首位，并保留原有的 dsh。' >&2
+  exit 1
+fi
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=\"$bin/../host-bootstrap.js\""
+exec "$real_dsh" "$@"

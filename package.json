@@ -1,0 +1,53 @@
+{
+  "name": "dsh-codex-migration",
+  "version": "0.1.11",
+  "description": "Import Codex conversations into DeepSeek Harness",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client-bundle.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.15"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web",
+      "external": [
+        "react",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "prepack": "node scripts/build-client.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "bin": {
+    "dsh-codex-cleanup": "./src/cleanup.js"
+  }
+}
