@@ -1,9 +1,10 @@
+import { publishReport } from './host-bridge.js'
+import { reportText } from './report.js'
 import { fitImportedRequest, importedSession, MAX_DEFAULT_OUTPUT } from './continuation.js'
 import { backfillImportedSidebar } from './sidebar.js'
-import { basename } from 'node:path'
 import { parseArgs } from 'node:util'
-import { discover, readRollout, rolloutId } from './source.js'
-import { importSession } from './import.js'
+import { discover } from './source.js'
+import { discoverGroups, importGroup } from './groups.js'
 import { cleanupCommand } from './cleanup-command.js'
 import { pruneBackedUpWorkspaces } from './workspaces.js'
 
@@ -13,7 +14,8 @@ export const inject = ['commands', 'sessionPersistence']
 const usage = '用法：/import-codex [会话ID ... | --all] [--archived] [--execute] [--cwd /绝对路径]'
 const safe = value => String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
 
-async function runCommand(ctx, rawInput, signal, fallbackCwd) {
+/** @returns {Promise<{kind: string, text: string, report?: object}>} */
+async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
   const args = rawInput.trim().match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []
   let values, positionals
   try {
@@ -30,81 +32,70 @@ async function runCommand(ctx, rawInput, signal, fallbackCwd) {
   if (values.all && positionals.length || values.execute && !values.all && !positionals.length) {
     return { kind: 'error', text: usage + '\n执行导入需明确指定 ID 或 --all。' }
   }
-  const { paths, titles } = await discover(values.archived)
-  const selected = new Set(positionals)
-  const found = new Set()
-  const candidates = new Map()
-  const output = []
-  const counts = { pending: 0, conflict: 0, skipped: 0, failed: 0 }
-  function report(status, detail) {
-    if (status === '冲突') counts.conflict++
-    else if (status === '跳过') counts.skipped++
-    else if (status === '失败') counts.failed++
-    else if (!values.execute) counts.pending++
-    output.push(status + ' ' + detail)
-  }
-  for (const path of paths) {
+  const { paths, titles } = await discover(true)
+  const { groups, issues } = await discoverGroups(paths, new Set(positionals), values.archived)
+  const output = [], reports = []
+  const counts = { '待导入': 0, '成功': 0, '部分完成': 0, '冲突': 0, '跳过': 0, '失败': 0 }
+  for (const group of groups) {
     if (signal?.aborted) break
-    const filename = basename(path)
-    try {
-      const id = await rolloutId(path)
-      if (selected.size && !selected.has(id)) continue
-      if (!candidates.has(id)) candidates.set(id, [])
-      candidates.get(id).push(path)
-      found.add(id)
-    } catch (error) {
-      if (!selected.size || [...selected].some(id => filename.endsWith('-' + id + '.jsonl'))) {
-        report('失败', safe(filename) + '：' + safe(error.message))
-      }
-    }
+    let result
+    try { result = await importGroup(ctx, group, { execute: values.execute, titles, cwd: values.cwd, signal, fallbackCwd, runtime }) }
+    catch (error) { result = { root: group.root, status: '失败', reason: error.message, results: [], failures: [] } }
+    counts[result.status]++
+    reports.push(result)
+    output.push(result.status + ' ' + safe(group.root) + (result.reason ? ' · ' + safe(result.reason) : ''))
+    for (const member of result.results) output.push('  ' + member.status + ' ' + safe(member.source) + ' ' + safe(member.title)
+      + ' → ' + member.id + (member.reason ? ' · ' + safe(member.reason) : '')
+      + (member.turns ? ' · 待导入 ' + member.turns + ' 轮' : '')
+      + (member.incomplete ? ' · 源末轮尚未结束' : ''),
+      ...reportText(member.analysis), ...(member.gaps ?? []).map(gap => '  · ' + safe(gap)),
+      ...(member.dependencies ?? []).map(dep => '  外部依赖 ' + safe(dep.name) + ' · ' + dep.status
+        + ' · ' + dep.count + ' 条 · 源行 ' + dep.line + ' · ' + dep.evidence),
+      ...((member.dependencies ?? []).length ? ['  静态配置比对不代表连接可用，未进行连接探测。'] : []))
+    for (const failure of result.failures) output.push('  ' + safe(failure.id) + ' · ' + safe(failure.phase ?? '历史未迁入') + '：' + safe(failure.reason))
   }
-  for (const [id, locations] of candidates) {
-    if (signal?.aborted) break
-    try {
-      let source
-      let conflicting = false
-      for (const path of locations) {
-        const copy = await readRollout(path)
-        if (copy.meta.id !== id) throw new Error('扫描后源会话 ID 发生变化')
-        if (source) {
-          if (copy.rows.every((item, i) => item.line === source.rows[i]?.line)) continue
-          if (!source.rows.every((item, i) => item.line === copy.rows[i]?.line)) {
-            conflicting = true
-            break
-          }
-        }
-        source = copy
-      }
-      if (conflicting) {
-        report('冲突', safe(id) + '：同一源会话 ID 有不同的历史文件')
-        continue
-      }
-      const result = await importSession(ctx, source, { title: titles.get(id), cwd: values.cwd,
-        execute: values.execute, signal, fallbackCwd })
-      report(result.status, [safe(id), safe(result.title), '→', result.id,
-        result.reason ? '· ' + safe(result.reason) : '',
-        result.turns ? '· 待导入 ' + result.turns + ' 轮' : '',
-        result.incomplete ? '· 源末轮尚未结束' : '',
-        ...((result.gaps ?? []).map(gap => '· ' + safe(gap)))].filter(Boolean).join(' '))
-    } catch (error) {
-      report('失败', safe(id) + '：' + safe(error.message))
-    }
-  }
-  for (const id of selected) if (!found.has(id)) report('失败', safe(id) + '：未找到源会话')
-  const total = output.length
-  const summary = '共 ' + total + ' 条 · 待导入 ' + counts.pending + ' · 冲突 ' + counts.conflict
-    + ' · 跳过 ' + counts.skipped + (counts.failed ? ' · 失败 ' + counts.failed : '')
+  const childCount = groups.reduce((total, group) => total + group.members.length - 1, 0)
+    + reports.reduce((total, report) => {
+      const members = groups.find(group => group.root === report.root)?.members ?? []
+      const missing = report.failures.filter(failure => failure.parent && !members.some(member => member.id === failure.id))
+      return total + new Set(missing.map(failure => failure.parent + ':' + failure.id)).size
+    }, 0)
+  const summary = '共 ' + groups.length + ' 个父会话组，包含 ' + childCount + ' 个子 agent · 待导入 ' + counts['待导入']
+    + ' · 冲突 ' + counts['冲突'] + ' · 跳过 ' + counts['跳过']
+    + (values.execute ? ' · 成功 ' + counts['成功'] + ' · 部分完成 ' + counts['部分完成'] : '')
+    + (counts['失败'] ? ' · 失败 ' + counts['失败'] : '') + (issues.length ? ' · 关系或源异常 ' + issues.length : '')
+  for (const issue of issues) output.push('异常 ' + safe(issue.id) + '：' + safe(issue.reason))
   if (signal?.aborted) output.push('已取消。')
   return { kind: 'success', text: [values.execute ? 'Codex 导入结果' : 'Codex 导入预览（只读）',
-    ...(!values.execute ? [summary, '范围：自动导入消息、工具轨迹、可读推理摘要、元数据及支持的附件。'] : []),
-    ...(output.length ? output : ['没有匹配的会话。'])].join('\n') }
+    summary, ...(output.length ? output : ['没有匹配的会话。'])].join('\n'),
+    report: { title: values.execute ? 'Codex 导入结果' : 'Codex 导入预览', summary, groups: reports, issues } }
+
 }
 
 export function apply(ctx) {
   ctx.on('codex-migration/owns-continuation', session => importedSession(session) ? true : undefined)
   ctx.on('codex-migration/default-output-limit', session => importedSession(session) ? MAX_DEFAULT_OUTPUT : undefined)
-  ctx.on('codex-migration/continuation-request', ({ session, request, window, record }) => {
-    if (importedSession(session)) return fitImportedRequest(ctx.get('tokenMeter'), session, request, window, record)
+  const retries = new WeakMap()
+  ctx.on('codex-migration/continuation-request', ({ session, request, window, configuration, record }) => {
+    if (!importedSession(session)) return
+    let step
+    for (let seq = session.seq - 1; seq >= 0; seq--) {
+      if (session.eventAt(seq).type === 'step/start') { step = seq; break }
+    }
+    let state = retries.get(session)
+    if (!state || state.step !== step) { state = { step, used: false, remaining: 0 }; retries.set(session, state) }
+    return fitImportedRequest(ctx.get('tokenMeter'), session, request, window, data => {
+      state.remaining = data.retainedPairs
+      record(data)
+    }, { forceAll: state.used, configuration })
+  })
+  ctx.on('agent/request-error', ({ agent, failure }, next) => {
+    const session = agent.session, state = retries.get(session)
+    if (!importedSession(session) || failure.code !== 'CONTEXT_WINDOW_EXCEEDED' || !state || state.used || !state.remaining) return next()
+    const last = session.eventAt(session.seq - 1)
+    if (last?.data?.stream?.some(chunk => /block|delta|text|reasoning|tool/.test(chunk.type))) return next()
+    state.used = true
+    return { kind: 'retry' }
   })
   const active = new Set()
   const workspaceCleanup = ctx.loader.await().then(() => pruneBackedUpWorkspaces(ctx)).catch(error => {
@@ -131,7 +122,12 @@ export function apply(ctx) {
       description: 'Preview or import Codex conversations',
       input: { hint: '[会话 ID … | --all] [--archived] [--execute] [--cwd 路径]' },
       handler(invocation) {
-        const run = workspaceCleanup.then(() => runCommand(ctx, invocation.rawInput, invocation.signal, invocation.agent.session.header.cwd))
+        const run = workspaceCleanup.then(async () => {
+          const { report, ...result } = await runCommand(ctx, invocation.rawInput, invocation.signal,
+            invocation.agent.session.header.cwd, invocation.agent.model.current())
+          if (report) publishReport(invocation.agent.session, report)
+          return result
+        })
         active.add(run)
         void run.then(() => active.delete(run), () => active.delete(run))
         return run

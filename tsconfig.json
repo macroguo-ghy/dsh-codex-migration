@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "module": "NodeNext",
+    "target": "ESNext",
+    "skipLibCheck": true,
+    "types": ["node", "react"]
+  },
+  "include": ["src/**/*.js", "src/**/*.d.ts", "scripts/**/*.mjs"]
+}

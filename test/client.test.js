@@ -13,8 +13,8 @@ test('budget card remains outside folded analysis and loads an unloaded pair by 
     window: { __ModuleLoader__: { load(bundle) { plugin = bundle.factory(() => ({})) } } },
   })
   assert.ok(plugin.inject.includes('remote') && plugin.inject.includes('remote.session'))
-  plugin.apply({ effect: fn => fn(), uiConversation: { events: { register(value) { definition = value } } },
-    slots: { inject: (_name, fn) => fn(), register(value) { slot = value } },
+  plugin.apply({ effect: fn => fn(), uiConversation: { events: { register(value) { if (value.kind === 'codex-migration-budget') definition = value } } },
+    slots: { inject: (_name, fn) => fn(), register(value) { if (value.key === 'codex-migration-budget') slot = value } },
     remote: { session: { async page(value) { request = value; return { ok: true, value: { records } } } } },
   })
   const event = { type: 'plugin:codex-migration/request-budget', seq: 99, data: { omitted: [] } }
@@ -28,6 +28,11 @@ test('budget card remains outside folded analysis and loads an unloaded pair by 
   assert.equal(request.address.sessionId, 'fixture-session')
   assert.equal(request.throughSeq, 15)
   assert.equal(request.beforeSeq, 16)
+  await readOriginal({ assistantSeq: 13, resultSeq: 15 }, {
+    kind: 'subagent', parentSessionId: 'parent', childSessionId: 'fixture-session', mode: 'continuable',
+  })
+  assert.equal(request.address.kind, 'subagent')
+  assert.equal(request.address.parentSessionId, 'parent')
   records = records.slice(0, 1)
   await assert.rejects(() => readOriginal({ assistantSeq: 13, resultSeq: 15 }), /原记录不完整/)
 })

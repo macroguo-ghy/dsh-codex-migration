@@ -43,7 +43,15 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
     row('event_msg', { type: 'item_completed', item: { type: 'UserMessage', content: [
       { type: 'text', text: '<skill>user pasted example</skill>' },
     ] } }),
-    row('response_item', { type: 'reasoning', summary: [{ text: 'original reasoning summary' }] }),
+    row('response_item', { type: 'message', role: 'user', content: [
+      { type: 'input_text', text: 'automatic guidance without a tag' },
+      { type: 'input_text', text: '<skill>literal user example</skill>' },
+    ], internal_chat_message_metadata_passthrough: { content_item_metadata: [
+      { provenance: { type: 'skills' } }, { provenance: { type: 'user' } },
+    ] } }),
+    message('user', '<skills_instructions>injected catalog</skills_instructions>'),
+    row('response_item', { type: 'reasoning', summary: [{ text: 'original reasoning summary' }], encrypted_content: 'opaque-with-summary' }),
+    row('response_item', { type: 'reasoning', summary: [], encrypted_content: 'opaque-no-summary' }),
     row('response_item', { type: 'function_call', call_id: 'call_fixture', name: 'lookup', arguments: '{"key":"probe"}' }),
     row('response_item', { type: 'function_call_output', call_id: 'call_fixture', output: 'original tool result' }),
     message('assistant', 'original assistant text'),
@@ -78,12 +86,16 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
     return result
   }
   const preview = await run({ command: '/import-codex' })
-  assert.equal(preview.result.text.split('\n')[1], '共 2 条 · 待导入 1 · 冲突 0 · 跳过 0 · 失败 1')
+  assert.equal(preview.result.text.split('\n')[1], '共 1 个父会话组，包含 0 个子 agent · 待导入 1 · 冲突 0 · 跳过 0 · 关系或源异常 1')
   assert.match(preview.result.text, /首次导入 main Original Codex title/)
   assert.doesNotMatch(preview.result.text, /\bfork\b/)
   assert.deepEqual(preview.sessions, [])
+  assert.match(preview.result.text, /加密推理有可读摘要.*1 条/)
+  assert.match(preview.result.text, /加密推理无可读摘要.*1 条/)
+  assert.match(preview.result.text, /missing.png/)
+  assert.match(preview.result.text, /源行/)
   const imported = await run({ command: '/import-codex --all --execute' })
-  assert.match(imported.result.text, /失败 rollout-broken/)
+  assert.match(imported.result.text, /异常 rollout-broken/)
   assert.match(imported.result.text, /成功 main/)
   assert.match(imported.result.text, /存储保真校验通过/)
   assert.match(imported.result.text, /missing.png/)
@@ -106,11 +118,15 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   assert.ok(imported.workspaces.some(workspace => workspace.sessions.includes(first.header.id)))
   const history = first.events.filter(event => event.type === 'user/message')
   assert.equal(history[0].data.content[1].text, 'historical AGENTS.md content')
-  assert.deepEqual(history.map(event => event.data.source.kind), [
+  assert.deepEqual(history.slice(0, 5).map(event => event.data.source.kind), [
     'codex-imported-context', 'user', 'codex-imported-context', 'user', 'user',
   ])
   assert.equal(history[2].data.content[0].text, '<skill>automatically loaded skill</skill>')
   assert.equal(history[3].data.content[0].text, 'human text in mixed record')
+  const byText = value => history.find(event => event.data.content.some(block => block.text === value))
+  assert.equal(byText('automatic guidance without a tag').data.source.kind, 'codex-imported-context')
+  assert.equal(byText('<skill>literal user example</skill>').data.source.kind, 'user')
+  assert.equal(byText('<skills_instructions>injected catalog</skills_instructions>').data.source.kind, 'codex-imported-context')
   const user = history[1].data.content
   assert.deepEqual(user.map(block => block.type), ['text', 'image', 'file', 'text'])
   assert.equal(user[0].text, 'original user text')
@@ -156,7 +172,7 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   assert.deepEqual(dshOnly.sessions, continued.sessions)
   await appendFile(source, lines(turn('third')))
   const conflictPreview = await run({ command: '/import-codex main' })
-  assert.equal(conflictPreview.result.text.split('\n')[1], '共 1 条 · 待导入 0 · 冲突 1 · 跳过 0')
+  assert.equal(conflictPreview.result.text.split('\n')[1], '共 1 个父会话组，包含 0 个子 agent · 待导入 0 · 冲突 1 · 跳过 0')
   const conflict = await run({ command: '/import-codex main --execute' })
   assert.match(conflict.result.text, /两边均新增/)
   assert.deepEqual(conflict.sessions, continued.sessions)
@@ -169,6 +185,17 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   const forkLog = fork.sessions.find(session => session.header.id !== first.header.id)
   assert.equal(forkLog.header.cwd, cwd)
   assert.equal(forkLog.events[0].data.originalCwd, join(root, 'gone'))
+
+  await writeFile(join(sessions, 'rollout-xml-title.jsonl'), lines([
+    row('session_meta', { id: 'xml-title', timestamp: stamp, cwd }), event('task_started'),
+    message('user', '<skills_instructions>title must ignore injection</skills_instructions>'),
+    row('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'untagged automatic context' }, { type: 'input_text', text: '<query>检查 SQL</query>' }],
+      internal_chat_message_metadata_passthrough: { content_item_metadata: [{}, { provenance: { type: 'user' } }] } }),
+    row('event_msg', { type: 'user_message', message: 'untagged automatic context\n<query>检查 SQL</query>' }),
+    message('assistant', 'answer'), event('task_complete'),
+  ]))
+  const xmlTitle = await run({ command: '/import-codex xml-title' })
+  assert.match(xmlTitle.result.text, /xml-title <query>检查 SQL<\/query>/)
 
   // Seed a durable prefix ending between a tool call and its result, as a
   // process crash could. Recovery must continue the exact append without redoing it.

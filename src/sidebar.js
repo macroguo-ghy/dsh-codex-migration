@@ -1,6 +1,6 @@
 export function refreshImportedSidebar(ctx, reader, events) {
   const cache = ctx.get('sessionProjectionCache')
-  if (!cache) return
+  if (!cache || reader.header.origin === 'subagent') return
   const { header, inheritedEventCount } = reader
   const snapshot = cache.coldSnapshot(header, inheritedEventCount, events)
   const { title, sessionListMetadata } = snapshot.values
@@ -24,7 +24,7 @@ export async function backfillImportedSidebar(ctx) {
   if (!cache) return
   const persistence = ctx.sessionPersistence
   for (const { header } of await persistence.list()) {
-    if (!/^session-codex-[a-f0-9]{64}$/.test(header.id) ||
+    if (header.origin === 'subagent' || !/^session-codex-[a-f0-9]{64}$/.test(header.id) ||
       ctx.get('sessions')?.get(header.id) || cache.cachedSnapshot(header, ['title'])?.values.title) continue
     try {
       const reader = await persistence.open(header.id, 'read')

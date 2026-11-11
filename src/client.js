@@ -5,11 +5,12 @@ import styles from './client.css'
 export const inject = ['slots', 'uiConversation', 'remote', 'remote.session']
 
 const kind = 'codex-migration-budget'
+const reportKind = 'codex-migration-report'
 
-export const budgetDefinition = {
+function definition(kind, type) { return {
   kind,
   target: 'chat',
-  match: event => event.type === 'plugin:codex-migration/request-budget'
+  match: event => event.type === type
     ? { id: String(event.seq), role: 'start' } : null,
   start: (_context, match) => match.event.data,
   update: context => context.state,
@@ -21,7 +22,10 @@ export const budgetDefinition = {
       location: start.location, visibility: 'visible', groupTree: 'turn', data: context.state ?? start.event.data,
     }
   },
-}
+} }
+
+export const budgetDefinition = definition(kind, 'plugin:codex-migration/request-budget')
+export const reportDefinition = definition(reportKind, 'plugin:codex-migration/report')
 
 function BudgetCard({ node, readOriginal }) {
   const [open, setOpen] = useState(false)
@@ -38,7 +42,7 @@ function BudgetCard({ node, readOriginal }) {
   async function openOriginal(pair) {
     setOriginal({ pair, loading: true })
     try {
-      const text = await readOriginal(pair)
+      const text = await readOriginal(pair, node.data.address)
       setOriginal(current => current?.pair === pair ? { pair, text } : current)
     } catch (error) {
       setOriginal(current => current?.pair === pair ? { pair, error: error.message ?? String(error) } : current)
@@ -92,12 +96,13 @@ function BudgetCard({ node, readOriginal }) {
 
 export function apply(ctx) {
   ctx.effect(() => ctx.uiConversation.events.register(budgetDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(reportDefinition))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: kind,
     inject: sessionId => ({
-      async readOriginal(pair) {
+      async readOriginal(pair, address) {
         const result = await ctx.remote.session.page({
-          address: { kind: 'session', sessionId }, throughSeq: pair.resultSeq,
+          address: address ?? { kind: 'session', sessionId }, throughSeq: pair.resultSeq,
           beforeSeq: pair.resultSeq + 1, maxMessages: 3,
         }, AbortSignal.timeout(15000))
         if (!result.ok) throw new Error(result.error.message)
@@ -108,4 +113,62 @@ export function apply(ctx) {
       },
     }),
   }, BudgetCard))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: reportKind,
+  }, ReportCard))
+}
+
+
+function MemberDetails({ member }) {
+  const [limit, setLimit] = useState(30)
+  const analysis = member.analysis
+  return h('div', { className: 'dsh-codex-budget-body' },
+    h('p', { className: 'dsh-codex-budget-note' }, member.status + ' · ' + member.source + ' → ' + member.id),
+    member.reason && h('p', null, member.reason),
+    analysis?.summary?.length > 0 && h('div', { className: 'dsh-codex-budget-tools' },
+      analysis.summary.map(item => h('span', { key: item.category }, item.label + ' ' + item.count + ' ' + item.unit))),
+    (member.dependencies ?? []).map(dep => h('p', { key: dep.name, className: 'dsh-codex-budget-note' },
+      '外部依赖 ' + dep.name + ' · ' + dep.status + ' · ' + dep.count + ' 条 · ' + dep.evidence)),
+    member.dependencies?.length > 0 && h('p', { className: 'dsh-codex-budget-note' }, '静态配置不代表连接可用，未进行连接探测。'),
+    analysis?.items?.length > 0 && h('ol', { className: 'dsh-codex-report-items' },
+      analysis.items.slice(0, limit).map((item, index) => h('li', { key: index },
+        h('span', null, item.message),
+        h('div', { className: 'dsh-codex-budget-note' }, item.source + ' · 源行 ' + (item.line ?? '未记录')
+          + (item.block === undefined ? '' : ' · 块 ' + (item.block + 1)))))),
+    analysis?.items?.length > limit && h(Button, { type: 'button', variant: 'ghost', size: 'sm',
+      onClick: () => setLimit(value => value + 30) }, '显示更多差异（' + limit + ' / ' + analysis.items.length + '）'))
+}
+
+function MemberRow({ member }) {
+  const [open, setOpen] = useState(false)
+  return h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
+    title: member.title || member.source, open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+    onToggle: () => setOpen(value => !value), collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, '子 agent · ' + member.status),
+  }, h(MemberDetails, { member }))
+}
+
+function GroupRow({ group }) {
+  const [open, setOpen] = useState(false)
+  const root = group.results.find(member => member.source === group.root)
+  return h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
+    title: root?.title || group.root, open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+    onToggle: () => setOpen(value => !value), collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, group.status),
+  }, h('div', { className: 'dsh-codex-budget-body' },
+    group.reason && h('p', null, group.reason), root && h(MemberDetails, { member: root }),
+    group.results.filter(member => member !== root).map(member => h(MemberRow, { key: member.source, member })),
+    group.failures.map(failure => h('p', { key: failure.id, className: 'dsh-codex-budget-note' },
+      failure.id + ' · ' + (failure.phase ?? '历史未迁入') + '：' + failure.reason))))
+}
+
+function ReportCard({ node }) {
+  const [open, setOpen] = useState(false)
+  const data = node.data
+  return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
+    h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: data.title,
+      open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+      onToggle: () => setOpen(value => !value),
+      collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, data.summary),
+    }, h('div', { className: 'dsh-codex-budget-body' },
+      data.groups.map(group => h(GroupRow, { key: group.root, group })),
+      data.issues.map((issue, index) => h('p', { key: index, className: 'dsh-codex-budget-note' }, issue.id + '：' + issue.reason)))))
 }

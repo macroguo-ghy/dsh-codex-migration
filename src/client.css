@@ -119,3 +119,12 @@
     gap: 6px;
   }
 }
+
+.dsh-codex-report-items {
+  max-height: 360px;
+  overflow: auto;
+  margin: 8px 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+.dsh-codex-report-items li { margin-bottom: 8px; }

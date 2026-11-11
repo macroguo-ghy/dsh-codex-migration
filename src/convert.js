@@ -2,6 +2,7 @@ import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { basename, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { classifyParts, submissions } from './origin.js'
 
 const text = value => ({ type: 'text', text: value })
 const images = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
@@ -85,10 +86,15 @@ export function epoch(value, fallback = 0) {
 }
 
 export function titleFor(source, title) {
-  const original = source.rows.find(({ row }) => row.type === 'response_item' &&
-    row.payload.role === 'user' && row.payload.content?.some?.(b =>
-      typeof b.text === 'string' && !/^\s*(?:<|# AGENTS\.md instructions)/.test(b.text)))
-  const candidate = title || source.meta.thread_name || original?.row.payload.content.map(block => block.text).join(' ')
+  const evidence = submissions(source.rows)
+  let original
+  for (const { row } of source.rows) {
+    if (row.type !== 'response_item' || row.payload.type !== 'message' || row.payload.role !== 'user') continue
+    const userParts = classifyParts(row.payload, evidence).filter(part => part.origin === 'user')
+    const candidate = userParts.map(part => part.block.text ?? '').join(' ').trim()
+    if (candidate) { original = candidate; break }
+  }
+  const candidate = title || source.meta.thread_name || original
   const clean = String(candidate ?? '').replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim()
   let titleText = ''
   let bytes = 0
@@ -123,32 +129,6 @@ function compactionSummary(payload) {
   return ''
 }
 
-const injectionForms = new Map([
-  ['environment_context', 'snapshot'],
-  ['recommended_plugins', 'catalog'],
-  ['skill', 'instructions'],
-  ['codex_delegation', 'relay'],
-  ['user_instructions', 'instructions'],
-  ['developer_instructions', 'instructions'],
-  ['system-reminder', 'notice'],
-])
-
-function injectionForm(block, humanSubmission) {
-  const value = block?.text?.trim?.()
-  if (!value) return undefined
-  if (/^<codex_delegation(?:\s[^>]*|)>/.test(value) && value.endsWith('</codex_delegation>')
-    && value.includes('<source_thread_id>') && value.includes('<input>')) return 'relay'
-  if (humanSubmission) return undefined
-  if (/^# AGENTS\.md instructions(?: for |\s|$)/.test(value) &&
-    value.includes('<INSTRUCTIONS>') && value.endsWith('</INSTRUCTIONS>')) return 'instructions'
-  const tag = /^<([\w-]+)(?:\s[^>]*|)>/.exec(value)?.[1]
-  return tag && value.endsWith('</' + tag + '>') ? injectionForms.get(tag) : undefined
-}
-
-function submittedText(parts) {
-  return parts.filter(block => typeof block?.text === 'string').map(block => block.text).join('\n')
-}
-
 export async function convertTurns(ctx, source, turns, start, emit, gaps, conversionVersion) {
   const legacy = conversionVersion === 1
   const attributeContext = conversionVersion >= 3
@@ -162,6 +142,7 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
     }
   }
   const store = ctx.get('attachments')
+  const sourceLines = new Map(source.rows.map((item, index) => [item, item.lineNumber ?? index + 1]))
   for (const [index, item] of turns.slice(start).entries()) {
     const turn = start + index + 1
     const { rows, reason } = item
@@ -173,22 +154,13 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
     const called = new Set()
     let step = false
     let reasoning = []
+    /** @type {{data: {usage?: unknown}} | undefined} */
     let latestAssistant
     let usageSnapshot
     let mappedUsage = false
     let aggregateUsage
     const hasUser = rows.some(({ row }) => row.type === 'response_item' && row.payload.type === 'message' && row.payload.role === 'user')
-    const humanSubmissions = new Set()
-    if (attributeContext) {
-      for (const { row } of rows) {
-        if (row.type !== 'event_msg') continue
-        const payload = row.payload
-        if (payload.type === 'user_message' && typeof payload.message === 'string') humanSubmissions.add(payload.message)
-        if (payload.type === 'item_completed' && payload.item?.type === 'UserMessage' && Array.isArray(payload.item.content)) {
-          humanSubmissions.add(submittedText(payload.item.content))
-        }
-      }
-    }
+    const inputEvidence = submissions(rows)
     const add = (type, data, time, extras) => emit(type, data, time, extras)
     const surface = (type, data, time, extras) => add(type, data, time, { surfaceOp: 'append', ...extras })
     const ensureStep = time => {
@@ -211,6 +183,7 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
       reasoning = []
     }
     const historicalInstruction = (role, blocks, time) => {
+      for (const _block of blocks) gaps.note?.('silent-context', '历史上下文：' + role)
       surface('user/message', {
         id: 'codex-context-' + turn + '-' + emit.next(), role: 'user',
         content: [text('[Codex 历史上下文：' + role + ']'), ...blocks],
@@ -232,6 +205,7 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
     if (turn === 1) ensureStep(initialTime)
     for (const [rowIndex, { row }] of rows.entries()) {
       const { type, payload: p, timestamp: time } = row
+      gaps.at?.({ line: sourceLines.get(rows[rowIndex]), turn })
       if (type === 'event_msg' && p.type === 'token_count') {
         const usage = tokenUsage(p.info?.last_token_usage)
         if (p.info?.last_token_usage && !usage) gaps.add('部分 Codex token 记录是快照或无法映射为 DSH 用量')
@@ -254,6 +228,7 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
         }
         if (!legacy) {
           const summary = compactionSummary(p)
+          gaps.note?.(summary ? 'compaction-summary' : 'compaction-missing', summary ? '压缩位置及原摘要已保留' : '压缩位置已保留，源未提供可读摘要')
           historicalInstruction('上下文压缩', [text(summary || 'Codex 在此压缩了上下文，原记录未提供可读摘要。')], time)
         }
         continue
@@ -276,10 +251,10 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
       if (!fallbackUser && type !== 'response_item') continue
       if (attributeContext && type === 'response_item' && p.type === 'message' &&
           p.role === 'user' && Array.isArray(p.content)) {
-        const humanSubmission = humanSubmissions.has(submittedText(p.content))
         const groups = []
-        for (const block of p.content) {
-          const form = injectionForm(block, humanSubmission)
+        for (const [blockIndex, { block, form, origin, evidence }] of classifyParts(p, inputEvidence).entries()) {
+          if (form) gaps.note?.('silent-context', '自动上下文：' + origin + '（' + evidence + '）', { block: blockIndex })
+          else if (origin === 'unknown') gaps.note?.('unknown-source', '来源证据不足，原文保持可见', { block: blockIndex })
           if (groups.length && groups.at(-1).form === form) groups.at(-1).parts.push(block)
           else groups.push({ form, parts: [block] })
         }
@@ -306,7 +281,12 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
         for (const summary of p.summary ?? []) {
           if (typeof summary.text === 'string' && summary.text) reasoning.push({ type: 'reasoning', text: summary.text })
         }
-        if (p.encrypted_content) gaps.add('Codex 加密推理不可读取，已保留可读摘要')
+        if (p.encrypted_content) {
+          const readable = (p.summary ?? []).some(block => typeof block.text === 'string' && block.text.trim())
+          gaps.note?.(readable ? 'reasoning-summary' : 'reasoning-missing', readable
+            ? 'Codex 加密推理不可读取，可读摘要已保留' : 'Codex 加密推理不可读取，源记录没有可读摘要')
+          Set.prototype.add.call(gaps, readable ? 'Codex 加密推理不可读取，可读摘要已保留' : 'Codex 加密推理不可读取，源记录没有可读摘要')
+        }
       } else if (p.type === 'function_call' || p.type === 'custom_tool_call') {
         const id = p.call_id
         if (typeof id !== 'string' || !id || called.has(id) || typeof p.name !== 'string' || !p.name) {

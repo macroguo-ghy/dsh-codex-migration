@@ -1,3 +1,4 @@
+import { digest } from './source.js'
 const SESSION_ID = /^session-codex-[a-f0-9]{64}$/
 export const MAX_DEFAULT_OUTPUT = 32768
 
@@ -52,22 +53,43 @@ function historyNotice(sessionId, pairs, total, seqs, names) {
   }
 }
 
+function calibration(session, route) {
+  let audit, factor = 1.15
+  for (let seq = 0; seq < (session.seq ?? 0); seq++) {
+    const event = session.eventAt(seq)
+    if (event.type === 'plugin:codex-migration/request-budget') audit = event.data
+    if (event.type !== 'assistant/message' || event.data.interrupted || audit?.route !== route) continue
+    const usage = event.data.usage
+    const input = usage && usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+    if (Number.isFinite(input) && input > 0 && audit.rawEstimate > 0) {
+      factor = Math.max(factor, input / audit.rawEstimate * 1.02)
+    }
+    audit = undefined
+  }
+  return factor
+}
+
 /** Only the outgoing model surface is changed. Every durable message stays intact. */
-export function fitImportedRequest(meter, session, request, window, record) {
+export function fitImportedRequest(meter, session, request, window, record, { forceAll = false, configuration = null } = {}) {
   if (!Number.isSafeInteger(window) || window <= 0) {
     throw new Error('当前模型没有生效上下文窗口，请配置模型窗口或切换到已知窗口的模型。')
   }
   const header = session.requestHeader()
   const measure = meter.measure(session, header)
   const reserve = request.maxTokens ?? MAX_DEFAULT_OUTPUT
-  const margin = Math.min(16384, Math.ceil(window * 0.08))
+  // The multiplier corrects heuristic pricing; retain a small additional
+  // allowance without charging the same estimation uncertainty twice.
+  const margin = Math.min(2048, Math.ceil(window * 0.01))
   const budget = window - reserve - margin
+  const route = digest(JSON.stringify({ configuration: configuration ?? {
+    provider: request.provider ?? null, model: request.model ?? null,
+    reasoningEffort: request.reasoningEffort ?? null, maxTokens: reserve,
+  }, window, tools: request.tools ?? [] }))
+  const factor = calibration(session, route)
   const toolSchema = request.tools?.length ? Math.ceil(JSON.stringify(request.tools).length / 4) + 4 : 0
-  let tokens = measure.surfaceTokens + toolSchema
+  let raw = measure.surfaceTokens + toolSchema
   const pairs = importedPairs(request.messages)
   const names = [...new Set(pairs.map(pair => pair.name))]
-  if (!pairs.length && tokens <= budget) return request
-
   const prices = new Map()
   for (const node of measure.nodes) {
     const event = session.eventAt(node.seq)
@@ -75,14 +97,11 @@ export function fitImportedRequest(meter, session, request, window, record) {
     if (message) prices.set(message.id, node)
   }
   const seqs = request.messages.map(message => prices.get(message.id)?.seq)
-  const omissions = []
-  const changed = new Map()
-  const deleted = new Set()
-  let notice = pairs.length ? historyNotice(session.id, [], pairs.length, seqs, names) : undefined
-  // Choose the newest suffix of complete pairs that fits. A pair with
-  // assistant prose or reasoning retains those blocks at its original position.
+  const omissions = [], changed = new Map(), deleted = new Set()
+  let notice = historyNotice(session.id, omissions, pairs.length, seqs, names)
+  const estimate = () => Math.ceil((raw + meter.estimateMessage(notice)) * factor)
   for (const pair of pairs) {
-    if (tokens + meter.estimateMessage(notice) <= budget) break
+    if (!forceAll && estimate() <= budget) break
     const original = request.messages[pair.index]
     const current = changed.get(pair.index) ?? original
     const result = request.messages[pair.result]
@@ -90,36 +109,30 @@ export function fitImportedRequest(meter, session, request, window, record) {
     changed.set(pair.index, reduced)
     if (!reduced.content.length) deleted.add(pair.index)
     deleted.add(pair.result)
-    tokens -= meter.estimateMessage(current) - (reduced.content.length ? meter.estimateMessage(reduced) : 0)
-    tokens -= prices.get(result.id)?.tokens ?? meter.estimateMessage(result)
+    raw -= meter.estimateMessage(current) - (reduced.content.length ? meter.estimateMessage(reduced) : 0)
+    raw -= prices.get(result.id)?.tokens ?? meter.estimateMessage(result)
     omissions.push(pair)
-    if (tokens <= budget || omissions.length === pairs.length) {
-      notice = historyNotice(session.id, omissions, pairs.length, seqs, names)
-      if (tokens + meter.estimateMessage(notice) <= budget) break
-    }
+    notice = historyNotice(session.id, omissions, pairs.length, seqs, names)
   }
-  const estimated = tokens + (notice ? meter.estimateMessage(notice) : 0)
+  const estimated = estimate()
   if (estimated > budget) {
     throw new Error('保留原文后的续聊请求约需 ' + estimated + ' 个输入 token，当前模型预算为 '
       + Math.max(budget, 0) + '。请切换到上下文窗口更大的模型。')
   }
   const messages = request.messages.flatMap((message, index) => deleted.has(index) ? [] : [changed.get(index) ?? message])
-  // Put the provenance boundary after the imported transcript, before native
-  // DSH turns. Even identically named tools then have an unambiguous origin.
   const importedEnd = messages.findLastIndex(message => /^codex-(?:message|user|context|result|system)-/.test(message.id ?? ''))
-  if (notice) messages.splice(importedEnd + 1, 0, notice)
+  messages.splice(importedEnd + 1, 0, notice)
   const omittedTimes = omissions.flatMap(pair => [pair.index, pair.result])
-    .map(index => seqs[index] === undefined ? null : session.eventAt(seqs[index])?.time)
-    .filter(Number.isFinite)
-  const timeRange = omittedTimes.length ? omittedTimes.reduce((range, time) => ({
-    start: Math.min(range.start, time), end: Math.max(range.end, time),
-  }), { start: omittedTimes[0], end: omittedTimes[0] }) : null
-  record({ window, budget, estimated, outputReserve: reserve, margin, totalPairs: pairs.length,
-    retainedPairs: pairs.length - omissions.length,
-    timeRange,
-    omitted: omissions.map(pair => ({
-    name: pair.name, callId: request.messages[pair.index].content[pair.blockIndex].id,
-    assistantSeq: seqs[pair.index] ?? null, resultSeq: seqs[pair.result] ?? null,
-  })) })
+    .map(index => seqs[index] === undefined ? null : session.eventAt(seqs[index])?.time).filter(Number.isFinite)
+  const timeRange = omittedTimes.length ? { start: Math.min(...omittedTimes), end: Math.max(...omittedTimes) } : null
+  const address = session.header?.origin === 'subagent'
+    ? { kind: 'subagent', parentSessionId: session.header.parentSession, childSessionId: session.id, mode: 'continuable' }
+    : { kind: 'session', sessionId: session.id }
+  record({ window, budget, estimated, rawEstimate: raw + meter.estimateMessage(notice), factor, route, address,
+    outputReserve: reserve, margin, totalPairs: pairs.length, retainedPairs: pairs.length - omissions.length,
+    retry: forceAll, timeRange, omitted: omissions.map(pair => ({
+      name: pair.name, callId: request.messages[pair.index].content[pair.blockIndex].id,
+      assistantSeq: seqs[pair.index] ?? null, resultSeq: seqs[pair.result] ?? null,
+    })) })
   return { ...request, messages }
 }

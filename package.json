@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-migration",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "description": "Import Codex conversations into DeepSeek Harness",
   "type": "module",
   "exports": {
@@ -45,9 +45,15 @@
   },
   "scripts": {
     "prepack": "node scripts/build-client.mjs",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "typecheck": "tsc --noEmit"
   },
   "bin": {
     "dsh-codex-cleanup": "./src/cleanup.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^18.3.26",
+    "typescript": "^5.9.3"
   }
 }

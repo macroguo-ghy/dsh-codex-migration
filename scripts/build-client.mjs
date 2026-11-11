@@ -11,6 +11,6 @@ const body = source.replace("import { createElement as h, useState } from 'react
   .replace("import styles from './client.css'", 'const styles = ' + JSON.stringify(styles))
   .replace(/^export /gm, '')
 const bundle = 'window.__ModuleLoader__.load({\n  id: "dsh-codex-migration",\n  factory: require => {\n'
-  + body.split('\n').map(line => '    ' + line).join('\n')
+  + body.split('\n').map(line => line ? '    ' + line : '').join('\n')
   + '\n    return { apply, inject }\n  }\n})\n'
 await writeFile(new URL('../src/client-bundle.js', import.meta.url), bundle)

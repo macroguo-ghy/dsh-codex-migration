@@ -29,7 +29,7 @@ function agentLoop(source) {
   return once(source, '}, startsRequestSeries, signal);\n\t\t\tconst live = new AssistantStreamAttempt',
     `}, startsRequestSeries, signal);
     const selectedRequest = this.loopCtx.bail("codex-migration/continuation-request", {
-      session: this.session, request: originalRequest, window: preparedCall?.context?.contextWindow,
+      session: this.session, request: originalRequest, window: preparedCall?.context?.contextWindow, configuration: preparedCall?.config,
       record: data => appendPluginRecord(this.session, "plugin:codex-migration/request-budget", data)
     });
     const request = selectedRequest === undefined ? originalRequest : markAgentLoopRequest(deepFreeze(selectedRequest));
@@ -51,14 +51,21 @@ function compaction(source) {
 
 registerHooks({
   load(url, context, nextLoad) {
-    const match = /\/(dsh-agent-loop|dsh-compaction-basic)\/lib\/index\.js$/.exec(url)
+    const match = /\/(dsh-agent-loop|dsh-compaction-basic|dsh-session)\/lib\/index\.js$/.exec(url)
     if (!match || !url.startsWith('file:')) return nextLoad(url, context)
     const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', url)), 'utf8'))
     if (pkg.version !== '0.2.2-rc.1' || pkg.name !== '@deepseek-ai/' + match[1]) {
       throw new Error('Codex continuation requires DSH 0.2.2-rc.1')
     }
     const loaded = nextLoad(url, context)
-    const source = typeof loaded.source === 'string' ? loaded.source : Buffer.from(loaded.source).toString('utf8')
+    const source = typeof loaded.source === 'string' ? loaded.source
+      : ArrayBuffer.isView(loaded.source)
+        ? Buffer.from(loaded.source.buffer, loaded.source.byteOffset, loaded.source.byteLength).toString('utf8')
+        : Buffer.from(loaded.source).toString('utf8')
+    if (match[1] === 'dsh-session') {
+      const bridge = JSON.stringify(new URL('./host-bridge.js', import.meta.url).href)
+      return { ...loaded, source: source + '\nimport { setRecordWriter } from ' + bridge + ';\nsetRecordWriter(appendPluginRecord);\n' }
+    }
     return { ...loaded, source: match[1] === 'dsh-agent-loop' ? agentLoop(source) : compaction(source) }
   },
 })

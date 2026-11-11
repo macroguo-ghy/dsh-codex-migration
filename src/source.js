@@ -68,7 +68,7 @@ export async function readRollout(path) {
     try {
       const row = JSON.parse(line)
       if (typeof row?.type !== 'string' || !row.payload || typeof row.payload !== 'object') throw new Error()
-      rows.push({ row, line })
+      rows.push({ row, line, lineNumber: index + 1 })
     } catch {
       if (index === lines.length - 1 && !raw.endsWith('\n') && !path.includes('/archived_sessions/')) {
         throw new Error('源文件末行不完整，等待 Codex 写完后重试')
