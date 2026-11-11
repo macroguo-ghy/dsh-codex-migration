@@ -72,11 +72,10 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   const env = { ...process.env, DSH_HOME: join(root, 'dsh'), CODEX_HOME: codex,
     DSH_AGENTS_HOME: join(root, 'agents'), DSH_TELEMETRY_DISABLED: '1',
     MIGRATION_PROBE_INPUT: input, MIGRATION_PROBE_OUTPUT: output }
+  delete env.NODE_OPTIONS
   assert.equal((await exec('dsh', ['--version'], { env })).stdout.trim(), '0.2.2-rc.1')
   const packed = (await exec('npm', ['pack', '--silent', '--pack-destination', root], { cwd: repository })).stdout.trim()
   await exec('dsh', ['plugin', '--profile', 'web', 'add', join(root, packed)], { cwd, env, timeout: 20_000 })
-  env.NODE_OPTIONS = [env.NODE_OPTIONS, '--import='
-    + join(root, 'dsh/profiles/web/node_modules/dsh-codex-migration/src/host-bootstrap.js')].filter(Boolean).join(' ')
   const run = async options => {
     await rm(output, { force: true })
     await writeFile(input, JSON.stringify(options))

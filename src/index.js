@@ -1,6 +1,5 @@
-import { publishReport } from './host-bridge.js'
+import { publishReport } from './records.js'
 import { reportText } from './report.js'
-import { fitImportedRequest, importedSession, MAX_DEFAULT_OUTPUT } from './continuation.js'
 import { backfillImportedSidebar } from './sidebar.js'
 import { parseArgs } from 'node:util'
 import { discover } from './source.js'
@@ -73,30 +72,6 @@ async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
 }
 
 export function apply(ctx) {
-  ctx.on('codex-migration/owns-continuation', session => importedSession(session) ? true : undefined)
-  ctx.on('codex-migration/default-output-limit', session => importedSession(session) ? MAX_DEFAULT_OUTPUT : undefined)
-  const retries = new WeakMap()
-  ctx.on('codex-migration/continuation-request', ({ session, request, window, configuration, record }) => {
-    if (!importedSession(session)) return
-    let step
-    for (let seq = session.seq - 1; seq >= 0; seq--) {
-      if (session.eventAt(seq).type === 'step/start') { step = seq; break }
-    }
-    let state = retries.get(session)
-    if (!state || state.step !== step) { state = { step, used: false, remaining: 0 }; retries.set(session, state) }
-    return fitImportedRequest(ctx.get('tokenMeter'), session, request, window, data => {
-      state.remaining = data.retainedPairs
-      record(data)
-    }, { forceAll: state.used, configuration })
-  })
-  ctx.on('agent/request-error', ({ agent, failure }, next) => {
-    const session = agent.session, state = retries.get(session)
-    if (!importedSession(session) || failure.code !== 'CONTEXT_WINDOW_EXCEEDED' || !state || state.used || !state.remaining) return next()
-    const last = session.eventAt(session.seq - 1)
-    if (last?.data?.stream?.some(chunk => /block|delta|text|reasoning|tool/.test(chunk.type))) return next()
-    state.used = true
-    return { kind: 'retry' }
-  })
   const active = new Set()
   const workspaceCleanup = ctx.loader.await().then(() => pruneBackedUpWorkspaces(ctx)).catch(error => {
     ctx.logger.warn('codex-migration: ' + error.message)

@@ -19,10 +19,11 @@ export async function harness(t, options = {}) {
   await mkdir(cwd); await mkdir(join(codex, 'sessions'), { recursive: true }); await mkdir(join(codex, 'archived_sessions'))
   const env = { ...process.env, DSH_HOME: join(root, 'dsh'), CODEX_HOME: codex, DSH_AGENTS_HOME: join(root, 'agents'),
     DSH_TELEMETRY_DISABLED: '1', MIGRATION_PROBE_INPUT: join(root, 'input.json'), MIGRATION_PROBE_OUTPUT: join(root, 'output.json') }
+  delete env.NODE_OPTIONS
   const repository = fileURLToPath(new URL('..', import.meta.url))
   const packed = (await exec('npm', ['pack', '--silent', '--pack-destination', root], { cwd: repository })).stdout.trim()
-  await exec('dsh', ['plugin', '--profile', 'web', 'add', join(root, packed)], { cwd, env, timeout: 20_000 })
-  env.NODE_OPTIONS = [env.NODE_OPTIONS, '--import=' + join(root, 'dsh/profiles/web/node_modules/dsh-codex-migration/src/host-bootstrap.js')].filter(Boolean).join(' ')
+  await exec('dsh', ['plugin', '--profile', 'web', ...(options.hotInstall ? ['list'] : ['add', join(root, packed)])], { cwd, env, timeout: 20_000 })
+  if (options.hotInstall) env.MIGRATION_PROBE_HOT_INSTALL = join(root, packed)
   const patch = join(root, 'probe.yml')
   await writeFile(patch, '- insert:\n    - id: runtime-probe\n      name: ' + new URL('./runtime-probe.mjs', import.meta.url).href + '\n'
     + (options.mcp ? '    - id: static-mcp\n      name: "@deepseek-ai/dsh-mcp-client"\n      disabled: true\n      config: {serverName: "' + options.mcp + '", transport: http, url: "http://127.0.0.1:1"}\n' : ''))

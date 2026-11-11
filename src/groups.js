@@ -166,6 +166,14 @@ export async function importGroup(ctx, group, options) {
       try {
         const handle = handles.get(node.id), { events } = await handle.read()
         const extras = []
+        const provenanceId = 'codex-context-provenance-' + node.id
+        if (!events.some(event => event.type === 'user/message' && event.data.id === provenanceId)) extras.push({
+          type: 'user/message', surfaceOp: 'append', data: {
+            id: provenanceId, role: 'user', source: { kind: 'codex-imported-context', form: 'notice' },
+            content: [{ type: 'text', text: 'Codex 历史工具说明：导入的工具调用及结果来自旧 Codex 运行环境，描述历史执行情况。'
+              + '当前可用工具和参数以本次请求提供的定义为准；即使名称相同，也不能据旧调用推断当前工具的能力、权限、工作目录或执行状态。' }],
+          },
+        })
         for (const child of group.members.filter(x => x.parent === node.id && succeeded.has(x.id))) {
           const childId = targetId(child.id)
           if (!events.some(e => e.type === 'subagent/catalog' && e.data.childId === childId)) extras.push({

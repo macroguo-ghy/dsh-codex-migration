@@ -13,6 +13,9 @@ export function apply(ctx) {
     const output = { sidebar }
     let driver, resumed, adapter
     try {
+      if (process.env.MIGRATION_PROBE_HOT_INSTALL) {
+        output.hotInstall = await ctx.get('pluginManager').installBundle(process.env.MIGRATION_PROBE_HOT_INSTALL)
+      }
       if (input.failMetadataOnce || input.failMetadataBefore) {
         const persistence = ctx.sessionPersistence
         let failed = false
@@ -46,6 +49,14 @@ export function apply(ctx) {
         })
         output.result = (await ctx.commands.execute(driver.agent, input.command, [], AbortSignal.timeout(60_000)))?.result
         output.commandReports = driver.agent.session.snapshotEvents().filter(e => e.type === 'plugin:codex-migration/report')
+        if (input.hotCycle) {
+          const manager = ctx.get('pluginManager')
+          await manager.setBundleEnabled('dsh-codex-migration', false)
+          output.disabledCommand = (await ctx.commands.execute(driver.agent, input.command, [], AbortSignal.timeout(5000)))?.result ?? null
+          await manager.setBundleEnabled('dsh-codex-migration', true)
+          output.reenabledResult = (await ctx.commands.execute(driver.agent, input.command, [], AbortSignal.timeout(10000)))?.result
+          output.reenabledReports = driver.agent.session.snapshotEvents().filter(e => e.type === 'plugin:codex-migration/report')
+        }
       }
       if (input.resume) {
         const requests = []
