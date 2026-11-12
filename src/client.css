@@ -128,3 +128,27 @@
   overflow-wrap: anywhere;
 }
 .dsh-codex-report-items li { margin-bottom: 8px; }
+
+.dsh-codex-context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.dsh-codex-context-actions select {
+  max-width: 100%;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-markdown-code-block);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dsw-radius-lg);
+  padding: 5px 8px;
+  font: inherit;
+}
+.dsh-codex-context-summary {
+  max-height: 480px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}

@@ -1,5 +1,6 @@
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { installContextWorkflow, currentChoice, writeChoice } from './context-workflow.js'
 
 // This local, model-free retry rebuilds a LOOP request from the changed native
 // surface. The frozen llm/stream request is never edited or sent to an adapter.
@@ -142,28 +143,51 @@ function finishPreparation(ctx, state, plan, turn, step) {
 
 export function installInitialContext(ctx) {
   const states = new Map()
+  const stateFor = agent => {
+    const session = agent.session
+    let state = states.get(session.id)
+    if (state?.ready) return state
+    const events = session.snapshotEvents()
+    const checkpoint = events.findLast(e => e.type === 'codex-migration/checkpoint')?.seq
+    if (checkpoint === undefined) state = { session, ready: true }
+    else {
+      const ready = events.some(e => e.seq > checkpoint && e.type === 'assistant/message' && !e.data.interrupted)
+      const begun = events.findLast(e => e.seq > checkpoint && e.type === BEGIN)
+      const ended = begun && events.some(e => e.type === 'plugin:codex-migration/request-budget' && e.data.preparationId === begun.data.preparationId)
+      state = { ...state, session, agent, checkpoint, ready, recovery: begun && !ended ? begun.data : undefined }
+      state.limits = request => limits(ctx, state, request)
+    }
+    states.set(session.id, state)
+    return state
+  }
+  const workflow = installContextWorkflow(ctx, stateFor)
   ctx.on('session/disposed', session => { if (states.get(session.id)?.session === session) states.delete(session.id) })
   ctx.on('session/event', (session, event) => {
     const state = states.get(session.id)
+    if (state?.session === session && !state.ready && event.type === 'turn/end'
+      && ['error', 'aborted'].includes(event.data.reason.kind)) {
+      const choice = currentChoice(session)
+      if (choice && ['resuming', 'summarizing'].includes(choice.status)) queueMicrotask(() => {
+        const latest = currentChoice(session)
+        if (states.get(session.id) === state && latest?.id === choice.id && ['resuming', 'summarizing'].includes(latest.status)) {
+          writeChoice(session, latest, { status: event.data.reason.kind === 'aborted' ? 'cancelled' : 'error',
+            reason: event.data.reason.error?.message ?? '已取消续聊，原输入与摘要进度均保留。' })
+        }
+      })
+    }
     if (state?.session === session && !state.ready && event.seq > state.checkpoint
       && event.type === 'assistant/message' && !event.data.interrupted) {
       // Observe the committed settlement, without appending from an observer.
       state.ready = true
       state.pending = undefined
+      const choice = currentChoice(session)
+      if (choice && ['resuming', 'pending'].includes(choice.status)) queueMicrotask(() => {
+        if (states.get(session.id) === state) writeChoice(session, currentChoice(session), { status: 'ready', reason: '已完成首次续聊，后续使用 DSH 原生自动压缩。上方失败提示属于准备阶段的历史记录，本次已恢复续聊。' })
+      })
     }
   })
   ctx.on('agent/pre-step', async ({ agent }, next) => {
-    const session = agent.session
-    if (states.get(session.id)?.ready) return next()
-    const events = session.snapshotEvents()
-    const checkpoint = events.findLast(e => e.type === 'codex-migration/checkpoint')?.seq
-    if (checkpoint === undefined) states.set(session.id, { session, ready: true })
-    else {
-      const ready = events.some(e => e.seq > checkpoint && e.type === 'assistant/message' && !e.data.interrupted)
-      const begun = events.findLast(e => e.seq > checkpoint && e.type === BEGIN)
-      const ended = begun && events.some(e => e.type === 'plugin:codex-migration/request-budget' && e.data.preparationId === begun.data.preparationId)
-      states.set(session.id, { session, agent, checkpoint, ready, recovery: begun && !ended ? begun.data : undefined })
-    }
+    stateFor(agent)
     return next()
   }, { prepend: true })
   ctx.on('agent/request', async ({ agent, turn, step }, next) => {
@@ -171,6 +195,10 @@ export function installInitialContext(ctx) {
     if (state?.recovery && !state.ready) {
       finishPreparation(ctx, state, state.recovery, turn, step)
       state.recovery = undefined
+    }
+    if (state && !state.ready) {
+      const { recoverSummary } = await import('./context-summary.js')
+      await recoverSummary(ctx, state)
     }
     return next()
   }, { prepend: true })
@@ -180,24 +208,43 @@ export function installInitialContext(ctx) {
     // A failed first admission leaves a request/header. On retry or a model
     // switch basic compaction may inspect that header before final admission.
     // Refuse its auxiliary model call until the first continuation succeeds.
-    if (request.purpose === 'compaction') throw new Error('首次 Codex 续聊尚未通过窗口检查，不生成摘要；请换大窗口后重试。')
+    if (request.purpose === 'compaction') {
+      if (state.nativeSummary) return yield* state.nativeSummary(request, next)
+      throw new Error('首次续聊需要先选择更大窗口模型或摘要后续聊。')
+    }
     if (!isAgentLoopRequest(request)) return yield* next()
     const envelope = limits(ctx, state, request)
     const estimated = Math.ceil(ctx.tokenMeter.measure(state.session).totalTokens * FACTOR)
-    if (estimated > envelope.budget) {
+    if (estimated > envelope.budget || currentChoice(state.session)?.status === 'summarizing') {
       state.pending = envelope
       yield { type: 'finish', reason: { kind: 'error', failure: { code: PREPARE, message: '正在准备迁移历史的续聊上下文' } } }
       return
     }
+    const choice = currentChoice(state.session)
+    if (choice?.status === 'resuming') writeChoice(state.session, choice, {
+      ...envelope, estimated, reason: '窗口检查通过，正在恢复续聊。',
+    })
     yield* next()
   }, { prepend: true })
-  ctx.on('agent/request-error', async ({ agent, failure, turn, step }, next) => {
+  ctx.on('agent/request-error', async ({ agent, failure, turn, step, signal }, next) => {
     const state = states.get(agent.session.id)
     if (failure.code === 'CONTEXT_WINDOW_EXCEEDED' && state && !state.ready) {
-      throw new Error('模型拒绝了首次 Codex 续聊的上下文。请换更大上下文窗口后重试；未生成摘要。')
+      workflow.offer(state, { ...limits(ctx, state, agent.session.requestHeader().config), providerRejected: true }, '模型返回上下文超限，请选择更大窗口模型或摘要后续聊。')
+      throw new Error('请换更大上下文窗口模型，或在续聊选择卡片中选择摘要后续聊。')
     }
     if (failure.code !== PREPARE || !state?.pending || state.ready) return next()
-    prepare(ctx, state, turn, step)
+    if (currentChoice(agent.session)?.status === 'summarizing') {
+      await workflow.summarize(state, signal)
+      state.pending = undefined
+      return { kind: 'retry' }
+    }
+    try { prepare(ctx, state, turn, step) }
+    catch (error) {
+      if (!error.message.startsWith('首次 Codex 续聊上下文仍超限')) throw error
+      workflow.offer(state, state.pending ?? limits(ctx, state, agent.session.requestHeader().config), error.message)
+      throw new Error('请换更大上下文窗口模型，或在续聊选择卡片中选择摘要后续聊。')
+    }
     return { kind: 'retry' }
   }, { prepend: true })
+  return () => workflow.busy()
 }

@@ -62,6 +62,7 @@ export function apply(ctx) {
       if (input.resume) {
         const requests = []
         output.summaries = 0
+        output.summaryRequests = []
         if (input.nativeTool) ctx.get('tools').register({
           name: 'migration_probe_read', description: 'Read isolated fixture evidence',
           parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -73,7 +74,7 @@ export function apply(ctx) {
           providerRetryPolicy: () => undefined,
           imageRequestPricing: () => undefined,
           imageRequestTarget: (_provider, _model, image) => ({ width: image.width, height: image.height, maxBytes: image.bytes }),
-          listModels: async () => [],
+          listModels: async () => ['fixture', 'large'].map(model => ({ provider: 'migration-probe', id: model, name: model })),
           async resolveModel(provider, model) {
             return { provider, id: model, name: model, context: { contextWindow: input.modelWindows?.[model] ?? input.window ?? 100_000 },
               ...(input.outputReserve === undefined ? {} : { defaultMaxTokens: input.outputReserve }), inputModalities: ['text', 'image'] }
@@ -82,6 +83,22 @@ export function apply(ctx) {
             return { model: await this.resolveModel(provider, model), stream: options => this.stream(options) }
           },
           async *stream(options) {
+            if (options.purpose === 'compaction' && input.nativeSummaryFailureCode) {
+              output.summaries++
+              yield { type: 'finish', reason: { kind: 'error', failure: { code: input.nativeSummaryFailureCode, message: 'fixture native summary failure' } } }
+              return
+            }
+            if (options.purpose === 'codex-migration-summary') {
+              output.summaryRequests.push({ messages: options.messages, maxTokens: options.maxTokens })
+              if (input.summaryInputMaxChars && JSON.stringify(options.messages).length > input.summaryInputMaxChars) {
+                yield { type: 'finish', reason: { kind: 'error', failure: { code: 'CONTEXT_WINDOW_EXCEEDED', message: 'fixture actual summary input limit' } } }
+                return
+              }
+              if (output.summaryRequests.length === input.summaryFailureAt) {
+                yield { type: 'finish', reason: { kind: 'error', failure: { code: input.summaryFailureCode ?? 'AUTH', message: 'fixture summary failure' } } }
+                return
+              }
+            }
             if (options.purpose === 'compaction') output.summaries++
             if (options.purpose === undefined) requests.push(options.messages)
             if (options.purpose === undefined && requests.length <= (input.overflow ?? 0)) {
@@ -101,7 +118,8 @@ export function apply(ctx) {
               return
             }
             yield { type: 'block-start', index: 0, blockType: 'text' }
-            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'native continuation answer' } }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: options.purpose === 'codex-migration-summary'
+              ? input.summaryText ?? '可读阶段摘要：历史任务与约束保留，未确认事项需回查原记录。' : 'native continuation answer' } }
             yield { type: 'finish', reason: { kind: 'stop' } }
           },
         })
@@ -118,9 +136,18 @@ export function apply(ctx) {
           output.preset = ctx.get('agentPresets').composedPreset(resumed.agent.ctx)
           output.compactionPolicy = ctx.get('agentPresets').serviceFor(resumed.agent, 'compaction')?.config
         }
-        resumed.agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: 'native continuation prompt' }],
+        resumed.agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: input.prompt ?? 'native continuation prompt' }],
           source: { kind: 'user' } })
         await resumed.agent.whenIdle()
+        if (input.contextActions) {
+          output.contextResults = []
+          for (const action of input.contextActions) {
+            const choice = resumed.agent.session.snapshotEvents().findLast(e => e.type === 'plugin:codex-migration/context-choice')
+            const line = action.replaceAll('$choice', choice?.data.id ?? 'missing')
+            output.contextResults.push((await ctx.commands.execute(resumed.agent, line, [], AbortSignal.timeout(60000)))?.result)
+            await resumed.agent.whenIdle()
+          }
+        }
         if (input.switchAfterFailure) {
           output.beforeSwitch = { requests: requests.length, summaries: output.summaries,
             errors: resumed.agent.session.snapshotEvents().filter(e => e.type === 'turn/end' && e.data.reason.kind === 'error').map(e => e.data.reason.error) }

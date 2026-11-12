@@ -3,12 +3,13 @@ window.__ModuleLoader__.load({
   factory: require => {
     const { createElement: h, useState } = require('react')
     const { DisclosureRow, Button, IconContextInjectionOutlineRegular } = require('@deepseek-ai/dsh-client-ui-primitives')
-    const styles = ".dsh-codex-budget {\n  min-width: 0;\n  color: var(--dsw-alias-label-secondary);\n  font-size: var(--dsh-content-font-size-secondary, 13px);\n  line-height: 1.6;\n}\n\n.dsh-codex-budget-summary {\n  margin-left: 8px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.dsh-codex-budget-body {\n  margin: 4px 0 8px 22px;\n  padding: 4px 0 4px 16px;\n  border-left: 1px solid var(--dsw-alias-border-l1);\n}\n\n.dsh-codex-budget-note {\n  margin: 0 0 12px;\n  color: var(--dsw-alias-label-tertiary);\n  overflow-wrap: anywhere;\n}\n\n.dsh-codex-budget-metrics {\n  display: grid;\n  gap: 4px;\n  margin: 0 0 12px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dsh-codex-budget-metrics > div {\n  display: grid;\n  grid-template-columns: 112px minmax(0, 1fr);\n  gap: 12px;\n}\n\n.dsh-codex-budget-metrics dt {\n  color: var(--dsw-alias-label-tertiary);\n}\n\n.dsh-codex-budget-metrics dd {\n  margin: 0;\n  overflow-wrap: anywhere;\n}\n\n.dsh-codex-budget-tools {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 4px 20px;\n  margin-bottom: 12px;\n}\n\n.dsh-codex-budget-tools > span {\n  display: inline-flex;\n  gap: 6px;\n}\n\n.dsh-codex-budget-tools > span > span,\n.dsh-codex-budget-seq {\n  color: var(--dsw-alias-label-tertiary);\n}\n\n.dsh-codex-budget code {\n  font-family: var(--dsw-font-family-mono, monospace);\n  font-size: inherit;\n}\n\n.dsh-codex-budget-records {\n  margin: 4px 0 0 22px;\n}\n\n.dsh-codex-budget-list {\n  max-height: 280px;\n  overflow: auto;\n}\n\n.dsh-codex-budget-record {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto auto;\n  align-items: center;\n  gap: 12px;\n  min-height: 32px;\n}\n\n.dsh-codex-budget-record code {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.dsh-codex-budget-original {\n  margin-top: 12px;\n}\n\n.dsh-codex-budget-original pre {\n  max-height: 400px;\n  margin: 4px 0;\n  padding: 12px 16px;\n  overflow: auto;\n  border: 0.5px solid var(--dsw-alias-border-l1);\n  border-radius: var(--dsw-radius-lg);\n  background: var(--dsw-alias-markdown-code-block);\n  color: var(--dsw-alias-label-primary);\n  font: var(--dsw-font-markdown-code-block-small);\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n}\n\n@media (max-width: 600px) {\n  .dsh-codex-budget-body {\n    margin-left: 6px;\n    padding-left: 10px;\n  }\n\n  .dsh-codex-budget-record {\n    gap: 6px;\n  }\n}\n\n.dsh-codex-report-items {\n  max-height: 360px;\n  overflow: auto;\n  margin: 8px 0;\n  padding-left: 20px;\n  overflow-wrap: anywhere;\n}\n.dsh-codex-report-items li { margin-bottom: 8px; }\n"
+    const styles = ".dsh-codex-budget {\n  min-width: 0;\n  color: var(--dsw-alias-label-secondary);\n  font-size: var(--dsh-content-font-size-secondary, 13px);\n  line-height: 1.6;\n}\n\n.dsh-codex-budget-summary {\n  margin-left: 8px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.dsh-codex-budget-body {\n  margin: 4px 0 8px 22px;\n  padding: 4px 0 4px 16px;\n  border-left: 1px solid var(--dsw-alias-border-l1);\n}\n\n.dsh-codex-budget-note {\n  margin: 0 0 12px;\n  color: var(--dsw-alias-label-tertiary);\n  overflow-wrap: anywhere;\n}\n\n.dsh-codex-budget-metrics {\n  display: grid;\n  gap: 4px;\n  margin: 0 0 12px;\n  font-variant-numeric: tabular-nums;\n}\n\n.dsh-codex-budget-metrics > div {\n  display: grid;\n  grid-template-columns: 112px minmax(0, 1fr);\n  gap: 12px;\n}\n\n.dsh-codex-budget-metrics dt {\n  color: var(--dsw-alias-label-tertiary);\n}\n\n.dsh-codex-budget-metrics dd {\n  margin: 0;\n  overflow-wrap: anywhere;\n}\n\n.dsh-codex-budget-tools {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 4px 20px;\n  margin-bottom: 12px;\n}\n\n.dsh-codex-budget-tools > span {\n  display: inline-flex;\n  gap: 6px;\n}\n\n.dsh-codex-budget-tools > span > span,\n.dsh-codex-budget-seq {\n  color: var(--dsw-alias-label-tertiary);\n}\n\n.dsh-codex-budget code {\n  font-family: var(--dsw-font-family-mono, monospace);\n  font-size: inherit;\n}\n\n.dsh-codex-budget-records {\n  margin: 4px 0 0 22px;\n}\n\n.dsh-codex-budget-list {\n  max-height: 280px;\n  overflow: auto;\n}\n\n.dsh-codex-budget-record {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto auto;\n  align-items: center;\n  gap: 12px;\n  min-height: 32px;\n}\n\n.dsh-codex-budget-record code {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.dsh-codex-budget-original {\n  margin-top: 12px;\n}\n\n.dsh-codex-budget-original pre {\n  max-height: 400px;\n  margin: 4px 0;\n  padding: 12px 16px;\n  overflow: auto;\n  border: 0.5px solid var(--dsw-alias-border-l1);\n  border-radius: var(--dsw-radius-lg);\n  background: var(--dsw-alias-markdown-code-block);\n  color: var(--dsw-alias-label-primary);\n  font: var(--dsw-font-markdown-code-block-small);\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n}\n\n@media (max-width: 600px) {\n  .dsh-codex-budget-body {\n    margin-left: 6px;\n    padding-left: 10px;\n  }\n\n  .dsh-codex-budget-record {\n    gap: 6px;\n  }\n}\n\n.dsh-codex-report-items {\n  max-height: 360px;\n  overflow: auto;\n  margin: 8px 0;\n  padding-left: 20px;\n  overflow-wrap: anywhere;\n}\n.dsh-codex-report-items li { margin-bottom: 8px; }\n\n.dsh-codex-context-actions {\n  display: flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 8px;\n  margin: 8px 0;\n}\n.dsh-codex-context-actions select {\n  max-width: 100%;\n  color: var(--dsw-alias-label-primary);\n  background: var(--dsw-alias-markdown-code-block);\n  border: 1px solid var(--dsw-alias-border-l1);\n  border-radius: var(--dsw-radius-lg);\n  padding: 5px 8px;\n  font: inherit;\n}\n.dsh-codex-context-summary {\n  max-height: 480px;\n  overflow: auto;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n  font: inherit;\n}\n"
 
-    const inject = ['slots', 'uiConversation', 'remote', 'remote.session']
+    const inject = ['slots', 'uiConversation', 'remote', 'remote.session', 'remote.commands']
 
     const kind = 'codex-migration-budget'
     const reportKind = 'codex-migration-report'
+    const choiceKind = 'codex-migration-context-choice'
 
     function definition(kind, type) { return {
       kind,
@@ -29,6 +30,59 @@ window.__ModuleLoader__.load({
 
     const budgetDefinition = definition(kind, 'plugin:codex-migration/request-budget')
     const reportDefinition = definition(reportKind, 'plugin:codex-migration/report')
+    const choiceDefinition = {
+      ...definition(choiceKind, 'plugin:codex-migration/context-choice'),
+      match: event => event.type === 'plugin:codex-migration/context-choice' ? { id: event.data.id, role: 'start' } : null,
+      update: (_context, match) => match.event.data,
+    }
+
+    function ChoiceCard({ node, act, restore, inputActions }) {
+      const data = node.data
+      const [open, setOpen] = useState(true), [busy, setBusy] = useState(false)
+      const [error, setError] = useState(''), [details, setDetails] = useState(''), [model, setModel] = useState('0')
+      const active = ['pending', 'error'].includes(data.status)
+      const number = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知'
+      async function run(action) {
+        setBusy(true); setError('')
+        try {
+          const result = await act(action, data.id)
+          if (action === 'summaries') setDetails(result.text)
+          if (action === 'cancel' && inputActions && data.pendingSeq !== null) {
+            const text = await restore(data.pendingSeq)
+            const span = inputActions.captureInsertion()
+            if (!inputActions.insertText(text, { ...span, start: span.end })) throw new Error('输入正在编辑或发送，文字仍保留在原消息中，可稍后恢复。')
+            inputActions.persistDraft()
+          }
+        } catch (cause) { setError(cause.message ?? String(cause)) }
+        finally { setBusy(false) }
+      }
+      return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
+        h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: '迁移续聊上下文',
+          open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true, onToggle: () => setOpen(value => !value),
+          collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
+            data.status === 'ready' ? '已恢复续聊' : data.status === 'cancelled' ? '已取消，输入保留' : data.status === 'summarizing' ? '摘要准备中' : '需要选择续聊方式'),
+        }, h('div', { className: 'dsh-codex-budget-body' },
+          h('p', { className: 'dsh-codex-budget-note' }, data.reason),
+          h('dl', { className: 'dsh-codex-budget-metrics' },
+            [['生效窗口', number(data.window)], ['输入估算 / 预算', number(data.estimated) + ' / ' + number(data.budget)],
+              ['已省略旧工具', number(data.omitted) + ' 对']].map(([label, value]) => h('div', { key: label }, h('dt', null, label), h('dd', null, value)))),
+          active && h('p', { className: 'dsh-codex-budget-note' }, '切换模型可保留更多原文。摘要会优先保留全部真人输入；仍放不下时摘要较早输入，近期输入保留原文。完整原记录始终保留。'),
+          active && h('div', { className: 'dsh-codex-context-actions' },
+            h(Button, { variant: 'secondary', size: 'sm', disabled: busy, onClick: () => run('models') }, '切换更大窗口模型'),
+            h(Button, { variant: 'secondary', size: 'sm', disabled: busy, onClick: () => run('summarize') }, data.status === 'error' ? '继续摘要并续聊' : '摘要后续聊')),
+          active && data.models && h('div', { className: 'dsh-codex-context-actions' },
+            data.models.length ? h('select', { 'aria-label': '更大窗口模型', value: model, onChange: event => setModel(event.target.value), disabled: busy },
+              data.models.map((item, index) => h('option', { key: index, value: String(index) }, item.name + ' · ' + item.provider + ' · ' + number(item.window))))
+              : h('span', null, '没有已确认可用的更大窗口模型。'),
+            data.models.length > 0 && h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('model ' + model) }, '切换并续聊')),
+          data.modelWarnings > 0 && h('p', { className: 'dsh-codex-budget-note' }, '部分模型信息读取失败，可稍后刷新列表。'),
+          h('div', { className: 'dsh-codex-context-actions' },
+            (active || data.status === 'summarizing') && h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('cancel') }, '取消'),
+            h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('summaries') }, '查看摘要与来源')),
+          data.preview && h('details', null, h('summary', null, '已保留的待续聊输入'), h('p', { className: 'dsh-codex-budget-note' }, data.preview)),
+          details && h('pre', { className: 'dsh-codex-context-summary' }, details),
+          error && h('p', { role: 'alert' }, error))))
+    }
 
     function BudgetCard({ node, readOriginal }) {
       const [open, setOpen] = useState(false)
@@ -63,7 +117,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'dsh-codex-budget-note' },
             '真人输入和历史模型正文全部保留。工具记录来自旧 Codex 环境，当前工具能力以本轮提供的定义为准。'),
           data.phase === 'initial' && h('p', { className: 'dsh-codex-budget-note' },
-            '首次准备不生成摘要，完整原记录仍可查看。准备成功后的新增对话使用 DSH 原生自动压缩。'),
+            '此步骤仅省略工具轨迹；摘要需要在续聊选择中明确选择。完整原记录仍可查看，首次续聊成功后使用 DSH 原生自动压缩。'),
           h('dl', { className: 'dsh-codex-budget-metrics' },
             [
               ['生效窗口', number(data.window) + ' token'],
@@ -103,6 +157,27 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(() => ctx.uiConversation.events.register(budgetDefinition))
       ctx.effect(() => ctx.uiConversation.events.register(reportDefinition))
+      ctx.effect(() => ctx.uiConversation.events.register(choiceDefinition))
+      ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+        name: 'conversation.chat.node', key: choiceKind,
+        inject: sessionId => ({
+          async act(action, id) {
+            const [verb, index] = action.split(' ')
+            const response = await ctx.remote.commands.execute(sessionId, '/codex-context ' + verb + ' ' + id + (index ? ' ' + index : ''), [])
+            if (!response.ok) throw new Error(response.error.message)
+            const result = response.value?.result
+            if (!result || result.kind === 'error') throw new Error(result?.text ?? '无法执行上下文选择。')
+            return result
+          },
+          async restore(seq) {
+            const response = await ctx.remote.session.page({ address: { kind: 'session', sessionId }, throughSeq: seq, beforeSeq: seq + 1, maxMessages: 1 }, AbortSignal.timeout(15000))
+            if (!response.ok) throw new Error(response.error.message)
+            const message = response.value.records.find(record => record.event.seq === seq && record.event.type === 'user/message')?.event.data
+            if (!message) throw new Error('暂时无法读取原输入，原记录仍保留。')
+            return message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+          },
+        }),
+      }, ChoiceCard))
       ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
         name: 'conversation.chat.node', key: kind,
         inject: sessionId => ({

@@ -36,7 +36,7 @@ export async function harness(t, options = {}) {
     },
     async run(options) {
       await rm(env.MIGRATION_PROBE_OUTPUT, { force: true }); await writeFile(env.MIGRATION_PROBE_INPUT, JSON.stringify(options))
-      await exec('dsh', ['web', '--patch', patch, '--no-open', '--port', '0'], { cwd, env, timeout: 25_000 })
+      await exec('dsh', ['web', '--patch', patch, '--no-open', '--port', '0'], { cwd, env, timeout: options.timeout ?? 25_000 })
       const result = JSON.parse(await readFile(env.MIGRATION_PROBE_OUTPUT, 'utf8'))
       if (result.error) throw new Error(result.error)
       return result

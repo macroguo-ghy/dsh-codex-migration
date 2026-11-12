@@ -9,7 +9,7 @@ import { cleanupCommand } from './cleanup-command.js'
 import { pruneBackedUpWorkspaces } from './workspaces.js'
 
 export const name = 'codex-migration'
-export const inject = ['commands', 'sessionPersistence', 'llm', 'tokenMeter']
+export const inject = ['commands', 'sessionPersistence', 'sessions', 'llm', 'tokenMeter']
 
 const usage = '用法：/import-codex [会话ID ... | --all] [--archived] [--execute] [--cwd /绝对路径]'
 const safe = value => String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
@@ -73,7 +73,7 @@ async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
 }
 
 export function apply(ctx) {
-  installInitialContext(ctx)
+  const contextBusy = installInitialContext(ctx)
   const active = new Set()
   const workspaceCleanup = ctx.loader.await().then(() => pruneBackedUpWorkspaces(ctx)).catch(error => {
     ctx.logger.warn('codex-migration: ' + error.message)
@@ -90,7 +90,7 @@ export function apply(ctx) {
       input: { hint: '[--execute，执行会重启 DSH Web]' },
       async handler(invocation) {
         await workspaceCleanup
-        return cleanupCommand(ctx, invocation, () => active.size > 0)
+        return cleanupCommand(ctx, invocation, () => active.size > 0 || contextBusy())
       },
     })
     yield ctx.commands.register({

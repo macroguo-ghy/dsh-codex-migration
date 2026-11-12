@@ -2,10 +2,11 @@ import { createElement as h, useState } from 'react'
 import { DisclosureRow, Button, IconContextInjectionOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './client.css'
 
-export const inject = ['slots', 'uiConversation', 'remote', 'remote.session']
+export const inject = ['slots', 'uiConversation', 'remote', 'remote.session', 'remote.commands']
 
 const kind = 'codex-migration-budget'
 const reportKind = 'codex-migration-report'
+const choiceKind = 'codex-migration-context-choice'
 
 function definition(kind, type) { return {
   kind,
@@ -26,6 +27,59 @@ function definition(kind, type) { return {
 
 export const budgetDefinition = definition(kind, 'plugin:codex-migration/request-budget')
 export const reportDefinition = definition(reportKind, 'plugin:codex-migration/report')
+export const choiceDefinition = {
+  ...definition(choiceKind, 'plugin:codex-migration/context-choice'),
+  match: event => event.type === 'plugin:codex-migration/context-choice' ? { id: event.data.id, role: 'start' } : null,
+  update: (_context, match) => match.event.data,
+}
+
+function ChoiceCard({ node, act, restore, inputActions }) {
+  const data = node.data
+  const [open, setOpen] = useState(true), [busy, setBusy] = useState(false)
+  const [error, setError] = useState(''), [details, setDetails] = useState(''), [model, setModel] = useState('0')
+  const active = ['pending', 'error'].includes(data.status)
+  const number = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知'
+  async function run(action) {
+    setBusy(true); setError('')
+    try {
+      const result = await act(action, data.id)
+      if (action === 'summaries') setDetails(result.text)
+      if (action === 'cancel' && inputActions && data.pendingSeq !== null) {
+        const text = await restore(data.pendingSeq)
+        const span = inputActions.captureInsertion()
+        if (!inputActions.insertText(text, { ...span, start: span.end })) throw new Error('输入正在编辑或发送，文字仍保留在原消息中，可稍后恢复。')
+        inputActions.persistDraft()
+      }
+    } catch (cause) { setError(cause.message ?? String(cause)) }
+    finally { setBusy(false) }
+  }
+  return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
+    h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: '迁移续聊上下文',
+      open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true, onToggle: () => setOpen(value => !value),
+      collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
+        data.status === 'ready' ? '已恢复续聊' : data.status === 'cancelled' ? '已取消，输入保留' : data.status === 'summarizing' ? '摘要准备中' : '需要选择续聊方式'),
+    }, h('div', { className: 'dsh-codex-budget-body' },
+      h('p', { className: 'dsh-codex-budget-note' }, data.reason),
+      h('dl', { className: 'dsh-codex-budget-metrics' },
+        [['生效窗口', number(data.window)], ['输入估算 / 预算', number(data.estimated) + ' / ' + number(data.budget)],
+          ['已省略旧工具', number(data.omitted) + ' 对']].map(([label, value]) => h('div', { key: label }, h('dt', null, label), h('dd', null, value)))),
+      active && h('p', { className: 'dsh-codex-budget-note' }, '切换模型可保留更多原文。摘要会优先保留全部真人输入；仍放不下时摘要较早输入，近期输入保留原文。完整原记录始终保留。'),
+      active && h('div', { className: 'dsh-codex-context-actions' },
+        h(Button, { variant: 'secondary', size: 'sm', disabled: busy, onClick: () => run('models') }, '切换更大窗口模型'),
+        h(Button, { variant: 'secondary', size: 'sm', disabled: busy, onClick: () => run('summarize') }, data.status === 'error' ? '继续摘要并续聊' : '摘要后续聊')),
+      active && data.models && h('div', { className: 'dsh-codex-context-actions' },
+        data.models.length ? h('select', { 'aria-label': '更大窗口模型', value: model, onChange: event => setModel(event.target.value), disabled: busy },
+          data.models.map((item, index) => h('option', { key: index, value: String(index) }, item.name + ' · ' + item.provider + ' · ' + number(item.window))))
+          : h('span', null, '没有已确认可用的更大窗口模型。'),
+        data.models.length > 0 && h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('model ' + model) }, '切换并续聊')),
+      data.modelWarnings > 0 && h('p', { className: 'dsh-codex-budget-note' }, '部分模型信息读取失败，可稍后刷新列表。'),
+      h('div', { className: 'dsh-codex-context-actions' },
+        (active || data.status === 'summarizing') && h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('cancel') }, '取消'),
+        h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('summaries') }, '查看摘要与来源')),
+      data.preview && h('details', null, h('summary', null, '已保留的待续聊输入'), h('p', { className: 'dsh-codex-budget-note' }, data.preview)),
+      details && h('pre', { className: 'dsh-codex-context-summary' }, details),
+      error && h('p', { role: 'alert' }, error))))
+}
 
 function BudgetCard({ node, readOriginal }) {
   const [open, setOpen] = useState(false)
@@ -60,7 +114,7 @@ function BudgetCard({ node, readOriginal }) {
       h('p', { className: 'dsh-codex-budget-note' },
         '真人输入和历史模型正文全部保留。工具记录来自旧 Codex 环境，当前工具能力以本轮提供的定义为准。'),
       data.phase === 'initial' && h('p', { className: 'dsh-codex-budget-note' },
-        '首次准备不生成摘要，完整原记录仍可查看。准备成功后的新增对话使用 DSH 原生自动压缩。'),
+        '此步骤仅省略工具轨迹；摘要需要在续聊选择中明确选择。完整原记录仍可查看，首次续聊成功后使用 DSH 原生自动压缩。'),
       h('dl', { className: 'dsh-codex-budget-metrics' },
         [
           ['生效窗口', number(data.window) + ' token'],
@@ -100,6 +154,27 @@ function BudgetCard({ node, readOriginal }) {
 export function apply(ctx) {
   ctx.effect(() => ctx.uiConversation.events.register(budgetDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(reportDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(choiceDefinition))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: choiceKind,
+    inject: sessionId => ({
+      async act(action, id) {
+        const [verb, index] = action.split(' ')
+        const response = await ctx.remote.commands.execute(sessionId, '/codex-context ' + verb + ' ' + id + (index ? ' ' + index : ''), [])
+        if (!response.ok) throw new Error(response.error.message)
+        const result = response.value?.result
+        if (!result || result.kind === 'error') throw new Error(result?.text ?? '无法执行上下文选择。')
+        return result
+      },
+      async restore(seq) {
+        const response = await ctx.remote.session.page({ address: { kind: 'session', sessionId }, throughSeq: seq, beforeSeq: seq + 1, maxMessages: 1 }, AbortSignal.timeout(15000))
+        if (!response.ok) throw new Error(response.error.message)
+        const message = response.value.records.find(record => record.event.seq === seq && record.event.type === 'user/message')?.event.data
+        if (!message) throw new Error('暂时无法读取原输入，原记录仍保留。')
+        return message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+      },
+    }),
+  }, ChoiceCard))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: kind,
     inject: sessionId => ({
