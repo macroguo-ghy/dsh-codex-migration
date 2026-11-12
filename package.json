@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-migration",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Import Codex conversations into DeepSeek Harness",
   "type": "module",
   "exports": {

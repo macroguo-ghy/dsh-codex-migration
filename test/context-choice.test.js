@@ -45,6 +45,9 @@ test('chunked summaries retain readable progress across a cold retry without rep
   for (const prompt of ['old requirement', 'middle requirement', 'latest requirement']) {
     assert.ok(resumed.requests[0].some(message => message.role === 'user' && message.content.some(block => block.text === prompt)))
   }
+  assert.match(resumed.summaryRequests[0].messages[1].content[0].text, /time=\d{4}-\d{2}-\d{2}T/)
+  assert.match(resumed.summaryRequests[0].messages[0].content[0].text, /不要新增建议/)
+  assert.match(resumed.contextResults.at(-1).text, /后续保留原文和用户修正优先/)
   assert.match(resumed.contextResults.at(-1).text, /精确来源.*UTF-16/)
   assert.match(resumed.contextResults.at(-1).text, /seq=\d+ from=\d+ to=\d+/)
   const events = resumed.sessions[0].events
@@ -205,4 +208,19 @@ test('only explicit summary input-size failures split chunks further before resu
   assert.ok(blocks.length > 1)
   assert.ok(blocks.every(event => event.data.estimated <= event.data.budget))
   assert.ok(result.requests[0].some(message => message.role === 'user' && message.content.some(block => block.text === 'native continuation prompt')))
+})
+
+test('summary keeps recent small model execution results verbatim, including exact measurements', { timeout: 60000 }, async t => {
+  const h = await harness(t)
+  const rows = [...turn('old task'), ...turn('latest status question')]
+  rows[2].payload.content[0].text = 'old historical model output '.repeat(40000)
+  const measurement = '实际已删除1995124260659字节；额外残留未统计；集群实际释放容量未测量。'
+  rows[6].payload.content[0].text = measurement
+  await h.source('recent-result', rows)
+  await h.run({ command: '/import-codex recent-result --execute' })
+  const result = await h.run({ resume: targetId('recent-result'), preset: 'standard', window: 200000,
+    outputReserve: 64000, contextActions: ['/codex-context summarize $choice'] })
+  assert.equal(result.requests.length, 1)
+  assert.ok(result.requests[0].some(message => message.role === 'assistant'
+    && message.content.some(block => block.type === 'text' && block.text === measurement)))
 })
