@@ -1,3 +1,5 @@
+import { MigrationService } from './migration-service.js'
+import { CodexMigration } from '../lib/controller.js'
 import { publishReport } from './records.js'
 import { installInitialContext } from './initial-context.js'
 import { reportText } from './report.js'
@@ -9,13 +11,13 @@ import { cleanupCommand } from './cleanup-command.js'
 import { pruneBackedUpWorkspaces } from './workspaces.js'
 
 export const name = 'codex-migration'
-export const inject = ['commands', 'sessionPersistence', 'sessions', 'llm', 'tokenMeter']
+export const inject = ['commands', 'sessionPersistence', 'sessions', 'llm', 'tokenMeter', 'typert']
 
 const usage = '用法：/import-codex [会话ID ... | --all] [--archived] [--execute] [--cwd /绝对路径]'
 const safe = value => String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
 
 /** @returns {Promise<{kind: string, text: string, report?: object}>} */
-async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
+async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime, coordinator) {
   const args = rawInput.trim().match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []
   let values, positionals
   try {
@@ -34,12 +36,14 @@ async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
   }
   const { paths, titles } = await discover(true)
   const { groups, issues } = await discoverGroups(paths, new Set(positionals), values.archived)
+  const execution = values.execute && coordinator ? await coordinator.executeCommand(groups,
+    { titles, cwd: values.cwd, fallbackCwd, runtime }, signal) : undefined
   const output = [], reports = []
   const counts = { '待导入': 0, '成功': 0, '部分完成': 0, '冲突': 0, '跳过': 0, '失败': 0 }
   for (const group of groups) {
-    if (signal?.aborted) break
+    if (signal?.aborted && !execution) break
     let result
-    try { result = await importGroup(ctx, group, { execute: values.execute, titles, cwd: values.cwd, signal, fallbackCwd, runtime }) }
+    try { result = execution ? execution.results[group.root] ?? { root: group.root, status: '跳过', reason: '任务已暂停，未完成范围可从 Codex 迁移页面继续', results: [], failures: [] } : await importGroup(ctx, group, { execute: values.execute, titles, cwd: values.cwd, signal, fallbackCwd, runtime }) }
     catch (error) { result = { root: group.root, status: '失败', reason: error.message, results: [], failures: [] } }
     counts[result.status]++
     reports.push(result)
@@ -75,6 +79,9 @@ async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
 export function apply(ctx) {
   const contextBusy = installInitialContext(ctx)
   const active = new Set()
+  const migration = MigrationService.open(ctx)
+  void migration.catch(error => ctx.logger.warn('codex-migration: ' + error.message))
+  ctx.plugin(CodexMigration, { dispatch: input => migration.then(service => service.dispatch(input)) })
   const workspaceCleanup = ctx.loader.await().then(() => pruneBackedUpWorkspaces(ctx)).catch(error => {
     ctx.logger.warn('codex-migration: ' + error.message)
   })
@@ -82,6 +89,7 @@ export function apply(ctx) {
     ctx.logger.warn('codex-migration: ' + error.message)
   })
   ctx.effect(function* () {
+    yield () => migration.then(service => service.close())
     yield () => Promise.allSettled(active)
     yield ctx.commands.register({
       definitionId: 'dsh-codex-migration/cleanup',
@@ -90,7 +98,8 @@ export function apply(ctx) {
       input: { hint: '[--execute，执行会重启 DSH Web]' },
       async handler(invocation) {
         await workspaceCleanup
-        return cleanupCommand(ctx, invocation, () => active.size > 0 || contextBusy())
+        const service = await migration
+        return cleanupCommand(ctx, invocation, () => active.size > 0 || service.busy() || contextBusy())
       },
     })
     yield ctx.commands.register({
@@ -101,7 +110,7 @@ export function apply(ctx) {
       handler(invocation) {
         const run = workspaceCleanup.then(async () => {
           const { report, ...result } = await runCommand(ctx, invocation.rawInput, invocation.signal,
-            invocation.agent.session.header.cwd, invocation.agent.model.current())
+            invocation.agent.session.header.cwd, invocation.agent.model.current(), await migration)
           if (report) publishReport(invocation.agent.session, report)
           return result
         })

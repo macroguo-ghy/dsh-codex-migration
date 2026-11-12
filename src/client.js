@@ -33,7 +33,42 @@ export const choiceDefinition = {
   update: (_context, match) => match.event.data,
 }
 
-function ChoiceCard({ node, act, restore, inputActions }) {
+const reasoningKind = 'codex-migration-reasoning-summary'
+const reasoningBase = definition(reasoningKind, 'assistant/message')
+function reasoningState(event, previous) {
+  const texts = event.data.message.content.filter(block => block.type === 'reasoning' && block.text?.trim()).map(block => block.text)
+  return { lastSeq: event.seq, items: [...(previous?.items ?? []), ...(texts.length ? [{ seq: event.seq, texts }] : [])] }
+}
+export const reasoningDefinition = {
+  ...reasoningBase,
+  match(event) {
+    const data = event.data, message = data?.message
+    return event.type === 'assistant/message' && message?.source?.provider === 'codex' && message.id?.startsWith('codex-message-')
+      ? { id: data.turn + ':' + data.step, role: 'start' } : null
+  },
+  start: (_context, match) => reasoningState(match.event),
+  update: (context, match) => reasoningState(match.event, context.state),
+  buildViewNode(context) {
+    const state = context.state
+    const hidden = state?.items.filter(item => item.seq !== state.lastSeq) ?? []
+    if (!hidden.length) return null
+    const node = reasoningBase.buildViewNode(context)
+    return node && { ...node, anchorSeq: hidden[0].seq, data: { items: hidden } }
+  },
+}
+function ReasoningCard({ node }) {
+  const [open, setOpen] = useState(false)
+  return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
+    h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: 'Codex 历史推理摘要',
+      open, expandable: true, expandOnRowClick: true, onToggle: () => setOpen(!open),
+      collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, '可读摘要 ' + node.data.items.length + ' 条'),
+    }, h('div', { className: 'dsh-codex-budget-body' },
+      h('p', { className: 'dsh-codex-budget-note' }, 'Codex 保存的可读摘要，不是完整隐藏推理。此处展示不新增模型输入。'),
+      node.data.items.map(item => h('div', { key: item.seq }, h('p', { className: 'dsh-codex-budget-note' }, '原事件 ' + item.seq),
+        h('pre', { className: 'dsh-codex-context-summary' }, item.texts.join('\n')))))))
+}
+
+function ChoiceCard({ node, act, restore, inputActions, readSource }) {
   const data = node.data
   const [open, setOpen] = useState(true), [busy, setBusy] = useState(false)
   const [error, setError] = useState(''), [details, setDetails] = useState(''), [model, setModel] = useState('0')
@@ -54,7 +89,7 @@ function ChoiceCard({ node, act, restore, inputActions }) {
     finally { setBusy(false) }
   }
   return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
-    h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: '迁移续聊上下文',
+    h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: data.status === 'ready' ? '迁移续聊已恢复 · 准备阶段超限已解决' : '迁移续聊上下文',
       open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true, onToggle: () => setOpen(value => !value),
       collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
         data.status === 'ready' ? '已恢复续聊' : data.status === 'cancelled' ? '已取消，输入保留' : data.status === 'summarizing' ? '摘要准备中' : '需要选择续聊方式'),
@@ -77,8 +112,28 @@ function ChoiceCard({ node, act, restore, inputActions }) {
         (active || data.status === 'summarizing') && h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('cancel') }, '取消'),
         h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => run('summaries') }, '查看摘要与来源')),
       data.preview && h('details', null, h('summary', null, '已保留的待续聊输入'), h('p', { className: 'dsh-codex-budget-note' }, data.preview)),
-      details && h('pre', { className: 'dsh-codex-context-summary' }, details),
+      details && h(SummaryDetails, { text: details, readSource }),
       error && h('p', { role: 'alert' }, error))))
+}
+
+function SummaryDetails({ text, readSource }) {
+  const [limit, setLimit] = useState(20), [original, setOriginal] = useState(null)
+  const lines = text.split('\n'), sources = lines.filter(line => /^seq=\d+ from=\d+ to=\d+$/.test(line))
+  const body = lines.filter(line => !/^seq=\d+ from=\d+ to=\d+$/.test(line) && !line.startsWith('精确来源（')).join('\n')
+  async function open(line, index) {
+    const seq = Number(line.match(/^seq=(\d+)/)[1])
+    setOriginal({ index, text: '读取中…' })
+    try { const text = await readSource(seq); setOriginal(current => current?.index === index ? { index, text } : current) }
+    catch (error) { setOriginal(current => current?.index === index ? { index, text: error.message } : current) }
+  }
+  return h('section', { 'aria-label': '摘要及来源' },
+    h('pre', { className: 'dsh-codex-context-summary' }, body),
+    sources.length > 0 && h('details', null, h('summary', null, '原记录来源 · ' + sources.length + ' 段（展开查看）'),
+      h('p', { className: 'dsh-codex-budget-note' }, '逐条查看对应轮次和原消息。精确偏移为 UTF-16 字符位置，不代表轮次。'),
+      sources.slice(0, limit).map((line, index) => h('div', { key: index, className: 'dsh-codex-budget-record' },
+        h('code', null, line), h(Button, { size: 'sm', variant: 'ghost', onClick: () => open(line, index) }, '查看原消息'),
+        original?.index === index && h('pre', { className: 'dsh-codex-context-summary', 'aria-label': '摘要对应的原消息', role: 'status' }, original.text))),
+      sources.length > limit && h(Button, { size: 'sm', variant: 'ghost', onClick: () => setLimit(limit + 30) }, '显示更多来源')))
 }
 
 function BudgetCard({ node, readOriginal }) {
@@ -155,6 +210,8 @@ export function apply(ctx) {
   ctx.effect(() => ctx.uiConversation.events.register(budgetDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(reportDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(choiceDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(reasoningDefinition))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({ name: 'conversation.chat.node', key: reasoningKind }, ReasoningCard))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: choiceKind,
     inject: sessionId => ({
@@ -165,6 +222,16 @@ export function apply(ctx) {
         const result = response.value?.result
         if (!result || result.kind === 'error') throw new Error(result?.text ?? '无法执行上下文选择。')
         return result
+      },
+      async readSource(seq) {
+        const response = await ctx.remote.session.page({ address: { kind: 'session', sessionId }, throughSeq: seq, beforeSeq: seq + 1, maxMessages: 1 }, AbortSignal.timeout(15000))
+        if (!response.ok) throw new Error(response.error.message)
+        const event = response.value.records.find(record => record.event.seq === seq)?.event
+        if (!event) throw new Error('原记录暂时不可读取，请稍后重试。')
+        const data = event.data, message = data.message ?? data
+        const title = (data.turn ? '第 ' + data.turn + ' 轮 · ' : '') + '原事件 ' + seq + ' · ' + (message.role ?? event.type)
+        const content = message.content?.map(block => ['text', 'reasoning'].includes(block.type) ? block.text : JSON.stringify(block)).join('\n')
+        return title + '\n\n' + (content ?? JSON.stringify(event, null, 2))
       },
       async restore(seq) {
         const response = await ctx.remote.session.page({ address: { kind: 'session', sessionId }, throughSeq: seq, beforeSeq: seq + 1, maxMessages: 1 }, AbortSignal.timeout(15000))
@@ -224,7 +291,7 @@ function MemberRow({ member }) {
   }, h(MemberDetails, { member }))
 }
 
-function GroupRow({ group }) {
+export function GroupRow({ group }) {
   const [open, setOpen] = useState(false)
   const root = group.results.find(member => member.source === group.root)
   return h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }),

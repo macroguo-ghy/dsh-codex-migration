@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { appendFile, readFile, writeFile } from 'node:fs/promises'
 
 export const inject = ['commands', 'agents', 'sessionPersistence', 'sessionQuery', 'llm']
 
@@ -43,13 +43,99 @@ export function apply(ctx) {
           await writer.flush()
         } finally { await writer.close() }
       }
+      if (input.migration) {
+        const migration = ctx.get('codexMigration')
+        const request = async payload => {
+          const response = JSON.parse(await migration.request(JSON.stringify(payload)))
+          if (!response.ok) throw new Error(response.error)
+          return response.value
+        }
+        const wait = async read => {
+          for (let attempt = 0; attempt < 2000; attempt++) {
+            const value = await read()
+            if (value) return value
+            await new Promise(resolve => setTimeout(resolve, 10))
+          }
+          throw new Error('migration probe timed out')
+        }
+        output.migration = {}
+        if (input.migration.resume) {
+          output.migration.before = await request({ op: 'task', id: input.migration.resume })
+          await request({ op: 'continue', id: input.migration.resume })
+          output.migration.task = await wait(async () => {
+            const task = await request({ op: 'task', id: input.migration.resume })
+            return task.state === 'completed' && task
+          })
+        } else {
+          await request({ op: 'scan' })
+          const preview = await wait(async () => { const view = await request({ op: 'state' }); return !view.scanning && view })
+          output.migration.preview = preview
+          if (input.migration.rewrite) await writeFile(input.migration.rewrite.path, input.migration.rewrite.lines)
+          if (input.migration.append) await appendFile(input.migration.append.path, input.migration.append.lines)
+          if (input.migration.crashAfterWrite) {
+            const persistence = ctx.sessionPersistence, create = persistence.create.bind(persistence)
+            persistence.create = async header => {
+              const handle = await create(header), append = handle.append.bind(handle)
+              handle.append = async events => { await append(events); await handle.flush(); process.kill(process.pid, 'SIGKILL') }
+              return handle
+            }
+          }
+          if (input.migration.pauseDuringWrite) {
+            const persistence = ctx.sessionPersistence, create = persistence.create.bind(persistence)
+            let paused = false
+            persistence.create = async header => {
+              const handle = await create(header), append = handle.append.bind(handle)
+              handle.append = async events => {
+                if (!paused) { paused = true; const view = await request({ op: 'state' }); await request({ op: 'pause', id: view.active }) }
+                return append(events)
+              }
+              return handle
+            }
+          }
+          const task = await request({ op: 'submit', previewId: preview.previewId, ids: input.migration.ids, requestId: 'probe-' + randomUUID() })
+          output.migration.task = await wait(async () => {
+            const current = await request({ op: 'task', id: task.id })
+            return ['completed', 'paused', 'interrupted'].includes(current.state) && current
+          })
+        }
+        if (input.migration.endPaused) {
+          const old = output.migration.task
+          output.migration.ended = await request({ op: 'end', id: old.id })
+          const state = await request({ op: 'state' })
+          const next = await request({ op: 'submit', previewId: state.previewId, requestId: 'after-end-' + randomUUID() })
+          output.migration.task = await wait(async () => { const task = await request({ op: 'task', id: next.id }); return task.state === 'completed' && task })
+        }
+        output.migration.agents = ctx.agents.list().map(agent => agent.session.header.id)
+      }
       if (input.command) {
+        const commandAbort = input.commandPauseDuringWrite ? new AbortController() : undefined
+        if (commandAbort) {
+          const persistence = ctx.sessionPersistence, create = persistence.create.bind(persistence)
+          let interrupted = false
+          persistence.create = async header => {
+            const handle = await create(header), append = handle.append.bind(handle)
+            handle.append = async events => {
+              if (!interrupted && header.id.startsWith('session-codex-')) { interrupted = true; commandAbort.abort() }
+              return append(events)
+            }
+            return handle
+          }
+        }
         driver = await ctx.agents.create({
           sessionId: 'migration-test-' + randomUUID(), meta: { cwd: process.cwd() },
           agentOptions: { provider: 'migration-probe', model: 'fixture' },
         })
-        output.result = (await ctx.commands.execute(driver.agent, input.command, [], AbortSignal.timeout(60_000)))?.result
+        try { output.result = (await ctx.commands.execute(driver.agent, input.command, [], commandAbort?.signal ?? AbortSignal.timeout(60_000)))?.result }
+        catch (error) { if (!commandAbort?.signal.aborted) throw error; output.commandCancelled = true }
+        if (commandAbort) {
+          for (let attempt = 0; attempt < 1000; attempt++) {
+            const state = JSON.parse(await ctx.get('codexMigration').request(JSON.stringify({ op: 'state' }))).value
+            if (!state.active) break
+            await new Promise(resolve => setTimeout(resolve, 10))
+          }
+        }
         output.commandReports = driver.agent.session.snapshotEvents().filter(e => e.type === 'plugin:codex-migration/report')
+        if (input.commandPauseDuringWrite) output.commandTasks = JSON.parse(await ctx.get('codexMigration').request(JSON.stringify({ op: 'state' }))).value.tasks
         if (input.hotCycle) {
           const manager = ctx.get('pluginManager')
           await manager.setBundleEnabled('dsh-codex-migration', false)

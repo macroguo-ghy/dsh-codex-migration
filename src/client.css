@@ -152,3 +152,9 @@
   overflow-wrap: anywhere;
   font: inherit;
 }
+
+.dsh-codex-budget-record > .dsh-codex-context-summary {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 0 0 12px;
+}

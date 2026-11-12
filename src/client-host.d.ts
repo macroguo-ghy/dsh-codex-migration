@@ -2,6 +2,8 @@
 // implementation and integration are verified against the pinned native host.
 declare module '*.css' { const css: string; export default css }
 declare module '@deepseek-ai/dsh-client-ui-primitives' {
+  export const Input: import('react').ComponentType<any>
+  export const SegmentedTabs: import('react').ComponentType<any>
   export const DisclosureRow: import('react').ComponentType<any>
   export const Button: import('react').ComponentType<any>
   export const IconContextInjectionOutlineRegular: import('react').ComponentType<any>

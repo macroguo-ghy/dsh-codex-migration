@@ -20,8 +20,8 @@ async function* rollouts(dir) {
   }
 }
 
-export async function discover(includeArchived) {
-  const root = resolve(process.env.CODEX_HOME || join(homedir(), '.codex'))
+export async function discover(includeArchived, sourceRoot) {
+  const root = resolve(sourceRoot || process.env.CODEX_HOME || join(homedir(), '.codex'))
   const paths = []
   for (const dir of includeArchived ? ['sessions', 'archived_sessions'] : ['sessions']) {
     for await (const path of rollouts(join(root, dir))) paths.push(path)
@@ -59,9 +59,9 @@ export async function rolloutId(path) {
   }
 }
 
-export async function readRollout(path) {
+export async function readRollout(path, throughLine) {
   const raw = await readFile(path, 'utf8')
-  const lines = raw.split('\n')
+  const lines = raw.split('\n').slice(0, throughLine)
   const rows = []
   for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue

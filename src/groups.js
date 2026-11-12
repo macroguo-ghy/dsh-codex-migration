@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline'
 import { createReadStream } from 'node:fs'
-import { readRollout, targetId } from './source.js'
+import { readRollout, targetId, splitTurns, digest } from './source.js'
 import { importSession, appendMetadata } from './import.js'
 import { refreshImportedSidebar } from './sidebar.js'
 
@@ -34,7 +34,7 @@ export async function discoverGroups(paths, selected, includeArchived) {
         if (parent !== old.parent) old.error = '同一源会话的父级归属相互矛盾'
       } else nodes.set(meta.id, { id: meta.id, meta, parent, paths: [path], children: [] })
     } catch (error) {
-      if (!selected.size || [...selected].some(id => path.endsWith('-' + id + '.jsonl'))) issues.push({ id: path.split('/').at(-1), reason: error.message })
+      if (!selected.size || [...selected].some(id => path.endsWith('-' + id + '.jsonl'))) issues.push({ id: path.split('/').at(-1), reason: error instanceof SyntaxError ? '源元数据不是有效 JSON' : error.message })
     }
   }
   for (const node of nodes.values()) if (node.parent !== undefined) {
@@ -66,11 +66,21 @@ export async function discoverGroups(paths, selected, includeArchived) {
   return { groups, issues }
 }
 
-async function load(node) {
+export class FrozenSourceError extends Error {}
+
+export async function load(node) {
+  try { return await loadMember(node) }
+  catch (error) {
+    if (node.frozen) throw new FrozenSourceError('预览范围内的源历史无法重现：' + error.message)
+    throw error
+  }
+}
+
+async function loadMember(node) {
   if (node.error) throw new Error(node.error)
   let source
   for (const path of node.paths) {
-    const copy = await readRollout(path)
+    const copy = await readRollout(path, node.frozen?.line)
     if (copy.meta.id !== node.id) throw new Error('扫描后源会话 ID 已变化')
     if (source) {
       if (copy.rows.every((x, i) => x.line === source.rows[i]?.line)) continue
@@ -78,7 +88,32 @@ async function load(node) {
     }
     source = copy
   }
+  if (node.frozen) {
+    const parsed = splitTurns(source), { count, hash, metaHash } = node.frozen
+    if (digest(JSON.stringify(source.meta)) !== metaHash || parsed.hashes[count] !== hash) {
+      throw new Error('预览范围内的源历史被改写或截断，请重新扫描')
+    }
+    const last = parsed.turns[count - 1]?.rows.at(-1)?.lineNumber ?? 1
+    source = { ...source, rows: source.rows.filter(item => item.lineNumber <= last) }
+  }
   return source
+}
+
+export async function freezeMember(node) {
+  const source = await load(node), parsed = splitTurns(source)
+  return { count: parsed.turns.length, hash: parsed.hashes.at(-1), metaHash: digest(JSON.stringify(source.meta)), recent: source.rows.at(-1)?.row.timestamp ?? source.meta.timestamp, line: parsed.turns.at(-1)?.rows.at(-1)?.lineNumber ?? source.rows[0]?.lineNumber, cutoffAt: parsed.turns.at(-1)?.rows.at(-1)?.row.timestamp ?? source.meta.timestamp }
+}
+
+export async function freezeGroup(group, titles) {
+  const members = []
+  for (const node of group.members) {
+    let frozen, error = node.error
+    try { frozen = await freezeMember(node) } catch (cause) { error = cause.message }
+    const { id, cwd, timestamp, agent_path, agent_role } = node.meta
+    members.push({ id: node.id, parent: node.parent, depth: node.depth, paths: node.paths,
+      meta: { id, cwd, timestamp, agent_path, agent_role }, title: titles.get(node.id), frozen, error })
+  }
+  return { root: group.root, members }
 }
 
 function spawnedChildren(source) {
@@ -99,12 +134,16 @@ function spawnedChildren(source) {
 export async function importGroup(ctx, group, options) {
   const handles = new Map(), sources = new Map(), results = [], failures = []
   const settings = node => ({ ...options, title: options.titles.get(node.id), keepOpen: true,
-    handle: handles.get(node.id), parentSession: node.parent ? targetId(node.parent) : undefined,
+    handle: handles.get(node.id), cwd: options.cwd ?? (node.parent ? handles.get(group.root)?.header.cwd ?? sources.get(group.root)?.meta.cwd : undefined), parentSession: node.parent ? targetId(node.parent) : undefined,
     depth: node.depth, onHandle: handle => handles.set(node.id, handle) })
   try {
     for (const node of group.members) {
+      await options.onPhase?.(node.id, '读取源历史')
       try { sources.set(node.id, await load(node)) }
-      catch (error) { failures.push({ id: node.id, parent: node.parent, phase: '读取源历史', reason: error.message }) }
+      catch (error) {
+        if (error instanceof FrozenSourceError) return { root: group.root, status: '冲突', reason: error.message, results, failures }
+        failures.push({ id: node.id, parent: node.parent, phase: '读取源历史', reason: error.message })
+      }
     }
     if (!sources.has(group.root)) return { status: '失败', root: group.root, results, failures }
     for (const node of group.members) {
@@ -136,7 +175,7 @@ export async function importGroup(ctx, group, options) {
     for (const node of group.members) {
       const source = sources.get(node.id)
       if (!source) continue
-      const result = await importSession(ctx, source, { ...settings(node), execute: false })
+      const result = await importSession(ctx, source, { ...settings(node), execute: false, previewDetails: options.previewDetails })
       results.push({ source: node.id, parent: node.parent, ...result })
       if (result.status === '冲突') return { root: group.root, status: '冲突', reason: result.reason, results, failures }
       if (!['跳过', '失败'].includes(result.status)) sourceAdded = true
@@ -152,13 +191,16 @@ export async function importGroup(ctx, group, options) {
       if (node.parent && !succeeded.has(node.parent)) {
         failures.push({ id: node.id, parent: node.parent, reason: '父历史未成功迁入' }); continue
       }
+      if (options.shouldPause?.()) return { root: group.root, status: '暂停', results, failures, paused: true }
       try {
         const result = await importSession(ctx, source, settings(node))
         results.push({ source: node.id, parent: node.parent, ...result })
+        await options.onMember?.(node.id, result)
         if (['成功', '跳过'].includes(result.status) && handles.has(node.id)) succeeded.add(node.id)
         else failures.push({ id: node.id, parent: node.parent, reason: result.reason ?? '无可迁移的完整轮次' })
       } catch (error) { failures.push({ id: node.id, parent: node.parent, phase: '写入成员历史', reason: error.message }) }
     }
+    await options.onPhase?.(group.root, '关联父子关系和侧边栏')
     // Publish only children that actually exist. Catalogs are durable native
     // identity, not fabricated tool executions or placeholders for missing data.
     for (const node of group.members) {

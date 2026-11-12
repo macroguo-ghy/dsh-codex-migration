@@ -12,7 +12,7 @@ import { assertStoredBatch, completedImports, storageHash } from './integrity.js
 const BEGIN = 'codex-migration/begin'
 const END = 'codex-migration/checkpoint'
 
-async function directory(path) {
+export async function directory(path) {
   if (!path || !isAbsolute(path)) return undefined
   try {
     const canonical = await realpath(path)
@@ -96,7 +96,7 @@ export async function importSession(ctx, source, options) {
   const original = await directory(meta.cwd)
   const alternative = await directory(options.cwd)
   if (options.cwd && !alternative) throw new Error('指定的 --cwd 必须是已存在的绝对目录')
-  const fallback = await directory(options.fallbackCwd) ?? await directory(process.cwd())
+  const fallback = options.requireCwd ? undefined : (await directory(options.fallbackCwd) ?? await directory(process.cwd()))
   const cwd = original ?? alternative ?? fallback
   const persistence = ctx.sessionPersistence
   const snapshot = await persistence.stat(id)
@@ -105,6 +105,7 @@ export async function importSession(ctx, source, options) {
     if (snapshot && !handle) handle = await persistence.open(id, options.execute ? 'write' : 'read')
     const current = handle ? (await handle.read()).events : []
     const action = plan(source, parsed, current)
+    if (!snapshot && !cwd && options.requireCwd) throw new Error('原工作目录不存在，请选择此 DSH 机器上已存在的绝对目录')
     if (handle && (handle.header.parentSession !== options.parentSession ||
       (handle.header.origin === 'subagent') !== !!options.parentSession)) {
       return { id, title, status: '冲突', reason: '目标会话父子归属与源历史不一致' }
@@ -129,12 +130,18 @@ export async function importSession(ctx, source, options) {
       }
     }
     let analysis
-    if (!options.execute && action.status !== '冲突') {
+    if (!options.execute && options.previewDetails !== false && action.status !== '冲突') {
       const dry = { get: name => name === 'attachments' ? {
         saveImage: async () => ({ preview: true }), saveFile: async () => ({ preview: true }),
       } : ctx.get(name) }
       const scan = await build(dry, source, parsed, { count: 0, stop: parsed.turns.length }, [], { createdAt: 0 }, title)
       analysis = scan.gaps.toJSON()
+    }
+    if (options.execute && action.status === '跳过' && handle && options.requireCwd) {
+      await options.onPhase?.(meta.id, '补齐工作区与侧边栏')
+      const attached = await directory(handle.header.cwd)
+      if (attached && !handle.header.origin && ctx.get('workspaceRegistry')) await attachImportedWorkspace(ctx.get('workspaceRegistry'), attached, id)
+      if (!handle.header.origin) refreshImportedSidebar(ctx, handle, current)
     }
     if (!options.execute || action.reason) return { id, title, dependencies: dependencyList, ...action, ...(analysis && { analysis }), incomplete: parsed.incomplete,
       ...(action.stop !== undefined ? { turns: action.stop - action.count } : {}),
@@ -148,6 +155,7 @@ export async function importSession(ctx, source, options) {
     }
     const recovery = action.recovery
     const before = recovery ? current.slice(0, recovery.seq) : current
+    await options.onPhase?.(meta.id, '转换历史')
     const batch = await build(ctx, source, parsed, action, before, header,
       recovery ? recovery.data.title : action.count ? null : title, options.runtime)
     const storedTail = current.slice(before.length)
@@ -157,8 +165,10 @@ export async function importSession(ctx, source, options) {
     options.signal?.throwIfAborted()
     handle ??= await persistence.create(header)
     options.onHandle?.(handle)
+    await options.onPhase?.(meta.id, '写入历史')
     await handle.append(batch.events.slice(storedTail.length))
     await handle.flush()
+    await options.onPhase?.(meta.id, '存储保真校验')
     const stored = (await handle.read()).events
     assertStoredBatch(batch.events, stored.slice(before.length))
     if (!options.keepOpen) { await handle.close(); handle = undefined }
@@ -178,13 +188,14 @@ export async function importSession(ctx, source, options) {
     if (attached && workspaces && !header.origin) {
       try {
         await attachImportedWorkspace(workspaces, attached, id)
-      } catch (error) { batch.gaps.add('关联 DSH 工作区失败：' + error.message) }
+      } catch (error) { if (options.requireCwd) throw error; batch.gaps.add('关联 DSH 工作区失败：' + error.message) }
     } else if (!attached) {
       batch.gaps.add('原工作目录不可用。可在首次导入时通过 --cwd 指定现有目录')
     }
     try {
       if (!header.origin) refreshImportedSidebar(ctx, observation, observation.events)
     } catch (error) {
+      if (options.requireCwd) throw error
       batch.gaps.add('刷新 DSH 侧边栏标题失败：' + error.message)
     }
     return { id, title, dependencies: dependencyList, status: '成功', reason: action.status + ' ' + (action.stop - action.count) + ' 轮 · 存储保真校验通过',
