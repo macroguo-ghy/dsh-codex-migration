@@ -16,6 +16,7 @@ export function apply(ctx) {
       if (process.env.MIGRATION_PROBE_HOT_INSTALL) {
         output.hotInstall = await ctx.get('pluginManager').installBundle(process.env.MIGRATION_PROBE_HOT_INSTALL)
       }
+      if (input.disableMigration) await ctx.get('pluginManager').setBundleEnabled('dsh-codex-migration', false)
       if (input.failMetadataOnce || input.failMetadataBefore) {
         const persistence = ctx.sessionPersistence
         let failed = false
@@ -60,6 +61,7 @@ export function apply(ctx) {
       }
       if (input.resume) {
         const requests = []
+        output.summaries = 0
         if (input.nativeTool) ctx.get('tools').register({
           name: 'migration_probe_read', description: 'Read isolated fixture evidence',
           parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -73,12 +75,14 @@ export function apply(ctx) {
           imageRequestTarget: (_provider, _model, image) => ({ width: image.width, height: image.height, maxBytes: image.bytes }),
           listModels: async () => [],
           async resolveModel(provider, model) {
-            return { provider, id: model, name: model, context: { contextWindow: 100_000 }, inputModalities: ['text', 'image'] }
+            return { provider, id: model, name: model, context: { contextWindow: input.modelWindows?.[model] ?? input.window ?? 100_000 },
+              ...(input.outputReserve === undefined ? {} : { defaultMaxTokens: input.outputReserve }), inputModalities: ['text', 'image'] }
           },
           async prepareCall(provider, model) {
             return { model: await this.resolveModel(provider, model), stream: options => this.stream(options) }
           },
           async *stream(options) {
+            if (options.purpose === 'compaction') output.summaries++
             if (options.purpose === undefined) requests.push(options.messages)
             if (options.purpose === undefined && requests.length <= (input.overflow ?? 0)) {
               if (input.partialOutput) {
@@ -107,12 +111,25 @@ export function apply(ctx) {
           return prepare(config, ...rest)
         }
         resumed = await ctx.agents.resume({ resumeSessionId: input.resume,
-          agentOptions: { provider: 'migration-probe', model: 'fixture' } })
+          agentOptions: { provider: 'migration-probe', model: input.model ?? 'fixture' },
+          ...(input.preset ? { setup: async agentCtx => { await ctx.get('agentPresets').mount(agentCtx, input.preset) } } : {}) })
+        if (input.model) resumed.agent.model.select({ provider: 'migration-probe', model: input.model })
+        if (input.preset) {
+          output.preset = ctx.get('agentPresets').composedPreset(resumed.agent.ctx)
+          output.compactionPolicy = ctx.get('agentPresets').serviceFor(resumed.agent, 'compaction')?.config
+        }
         resumed.agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: 'native continuation prompt' }],
           source: { kind: 'user' } })
         await resumed.agent.whenIdle()
+        if (input.switchAfterFailure) {
+          output.beforeSwitch = { requests: requests.length, summaries: output.summaries,
+            errors: resumed.agent.session.snapshotEvents().filter(e => e.type === 'turn/end' && e.data.reason.kind === 'error').map(e => e.data.reason.error) }
+          resumed.agent.model.select({ provider: 'migration-probe', model: 'large' })
+          resumed.agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: 'retry with larger window' }], source: { kind: 'user' } })
+          await resumed.agent.whenIdle()
+        }
         for (let index = 1; index < (input.followups ?? 1); index++) {
-          resumed.agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: 'native followup ' + index }], source: { kind: 'user' } })
+          resumed.agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: input.followupText ?? 'native followup ' + index }], source: { kind: 'user' } })
           await resumed.agent.whenIdle()
         }
         if (input.childTask) {
@@ -121,12 +138,14 @@ export function apply(ctx) {
           await ctx.get('subagents').waitForChildren(resumed.agent)
         }
         output.requests = requests
+        output.turnErrors = resumed.agent.session.snapshotEvents().filter(e => e.type === 'turn/end' && e.data.reason.kind === 'error').map(e => e.data.reason.error)
         await resumed.dispose()
         resumed = undefined
       }
       if (input.catalogs) output.catalogs = await Promise.all(input.catalogs.map(id => ctx.get('subagents').listChildren(id)))
       const controller = ctx.get('sessionController')
       if (input.addresses) output.pages = await Promise.all(input.addresses.map(address => controller.page({ address, maxMessages: 20 }, AbortSignal.timeout(5000))))
+      if (input.pageRequests) output.originalPages = await Promise.all(input.pageRequests.map(request => controller.page(request, AbortSignal.timeout(5000))))
       if (controller) output.sessionList = (await controller.list({}, AbortSignal.timeout(5000))).items
       output.sessions = []
       for (const item of await ctx.sessionPersistence.list()) {

@@ -176,6 +176,11 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
     }
     const assistant = (blocks, time) => {
       ensureStep(time)
+      if (conversionVersion >= 5 && reasoning.length && blocks.some(block => block.type === 'tool-call')) {
+        const saved = reasoning
+        reasoning = []
+        assistant(saved, time)
+      }
       latestAssistant = surface('assistant/message', { ...base, message: {
         id: 'codex-message-' + turn + '-' + time + '-' + emit.next(), role: 'assistant',
         content: [...reasoning, ...blocks], source: { kind: 'model', provider: 'codex', model },

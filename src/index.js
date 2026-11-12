@@ -1,4 +1,5 @@
 import { publishReport } from './records.js'
+import { installInitialContext } from './initial-context.js'
 import { reportText } from './report.js'
 import { backfillImportedSidebar } from './sidebar.js'
 import { parseArgs } from 'node:util'
@@ -8,7 +9,7 @@ import { cleanupCommand } from './cleanup-command.js'
 import { pruneBackedUpWorkspaces } from './workspaces.js'
 
 export const name = 'codex-migration'
-export const inject = ['commands', 'sessionPersistence']
+export const inject = ['commands', 'sessionPersistence', 'llm', 'tokenMeter']
 
 const usage = '用法：/import-codex [会话ID ... | --all] [--archived] [--execute] [--cwd /绝对路径]'
 const safe = value => String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
@@ -72,6 +73,7 @@ async function runCommand(ctx, rawInput, signal, fallbackCwd, runtime) {
 }
 
 export function apply(ctx) {
+  installInitialContext(ctx)
   const active = new Set()
   const workspaceCleanup = ctx.loader.await().then(() => pruneBackedUpWorkspaces(ctx)).catch(error => {
     ctx.logger.warn('codex-migration: ' + error.message)

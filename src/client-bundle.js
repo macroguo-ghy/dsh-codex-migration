@@ -55,18 +55,21 @@ window.__ModuleLoader__.load({
         h('style', null, styles),
         h(DisclosureRow, {
           icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
-          title: '迁移续聊', open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+          title: data.phase === 'initial' ? '首次续聊准备' : '迁移续聊', open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
           onToggle: () => setOpen(value => !value),
           collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
             '已省略 ' + number(omitted.length) + ' 对工具轨迹'),
         }, h('div', { className: 'dsh-codex-budget-body' },
           h('p', { className: 'dsh-codex-budget-note' },
             '真人输入和历史模型正文全部保留。工具记录来自旧 Codex 环境，当前工具能力以本轮提供的定义为准。'),
+          data.phase === 'initial' && h('p', { className: 'dsh-codex-budget-note' },
+            '首次准备不生成摘要，完整原记录仍可查看。准备成功后的新增对话使用 DSH 原生自动压缩。'),
           h('dl', { className: 'dsh-codex-budget-metrics' },
             [
               ['生效窗口', number(data.window) + ' token'],
               ['输入估算 / 预算', number(data.estimated) + ' / ' + number(data.budget)],
               ['输出预留', number(data.outputReserve) + ' token'],
+              ...(data.phase === 'initial' ? [['首次上下文上界', number(data.threshold) + ' token']] : []),
               ['估算余量', number(data.margin) + ' token'],
               ['工具轨迹', '省略 ' + number(omitted.length) + ' 对 · ' + retained],
             ].map(([label, value]) => h('div', { key: label }, h('dt', null, label), h('dd', null, value)))),
@@ -104,15 +107,14 @@ window.__ModuleLoader__.load({
         name: 'conversation.chat.node', key: kind,
         inject: sessionId => ({
           async readOriginal(pair, address) {
-            const result = await ctx.remote.session.page({
-              address: address ?? { kind: 'session', sessionId }, throughSeq: pair.resultSeq,
-              beforeSeq: pair.resultSeq + 1, maxMessages: 3,
-            }, AbortSignal.timeout(15000))
-            if (!result.ok) throw new Error(result.error.message)
-            const records = result.value.records.map(record => record.event)
-              .filter(event => event.seq === pair.assistantSeq || event.seq === pair.resultSeq)
-            if (records.length !== 2) throw new Error('原记录不完整，无法显示对应调用和结果')
-            return JSON.stringify(records, null, 2)
+            const results = await Promise.all([pair.assistantSeq, pair.resultSeq].map(seq => ctx.remote.session.page({
+              address: address ?? { kind: 'session', sessionId }, throughSeq: seq,
+              beforeSeq: seq + 1, maxMessages: 1,
+            }, AbortSignal.timeout(15000))))
+            for (const result of results) if (!result.ok) throw new Error(result.error.message)
+            const records = new Map(results.flatMap(result => result.value.records.map(record => [record.event.seq, record.event])))
+            if (!records.has(pair.assistantSeq) || !records.has(pair.resultSeq)) throw new Error('原记录不完整，无法显示对应调用和结果')
+            return JSON.stringify([records.get(pair.assistantSeq), records.get(pair.resultSeq)], null, 2)
           },
         }),
       }, BudgetCard))
