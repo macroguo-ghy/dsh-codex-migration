@@ -32,3 +32,31 @@
 .cm-cleanup-row label input { margin-inline-end: 8px }
 .cm-warning { padding: 12px; margin: 12px 0; background: var(--dsw-alias-interactive-bg-hover-danger); border-inline-start: 3px solid var(--dsw-alias-state-error-primary); font-weight: 600 }
 .cm-page :focus-visible { outline: 2px solid var(--dsw-alias-link); outline-offset: 2px }
+
+.cm-task-detail-group > div + .cm-button,
+.cm-detail-actions { margin-block-start: 10px }
+
+.cm-filters > .cm-select-control,
+.cm-select-control {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+.cm-page .cm-select-control select {
+  appearance: none;
+  padding-inline-end: 32px;
+}
+.cm-select-control::after {
+  content: '';
+  position: absolute;
+  inset-inline-end: 12px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}

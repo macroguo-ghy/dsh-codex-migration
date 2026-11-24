@@ -14,6 +14,10 @@ const busy = task => ['running', 'pausing', 'ending'].includes(task?.state)
 const button = (text, onClick, disabled = false, primary = false) => h(Button, { type: 'button', size: 'sm',
   variant: primary ? 'primary' : 'ghost', onClick, disabled }, text)
 const types = () => ({ ordinary: t('普通', 'Ordinary'), side: t('侧边对话', 'Side conversation'), automation: t('自动化', 'Automation'), review: 'Review', exec: 'Codex Exec' })
+function selectControl(props, ...options) {
+  return h('span', { className: 'cm-select-control' }, h('select', props, ...options))
+}
+
 const date = value => value ? formatDate(value) : t('尚未扫描', 'Not scanned')
 
 function diagnostics(task) {
@@ -157,7 +161,7 @@ function TaskCard({ task, actions, onRetry, onWithdraw }) {
     feedback && h('p', { role: 'status' }, feedback),
     ['running', 'pausing', 'paused', 'interrupted'].includes(task.state) && h('p', { className: 'cm-muted' }, t('暂停会完成当前成员后停下；结束会释放未完成范围，已导入数据保留。关闭页面不会停止任务。', 'Pausing finishes the current item first. Ending releases unfinished work and keeps imported data. Closing this page leaves the task running.')),
     open && h('div', { className: 'cm-details' }, h('p', null, task.id), task.retryOf && h('p', null, t('重试自：', 'Retry of: ') + task.retryOf), h('p', null, t('来源：', 'Source: ') + task.sourceRoot),
-      task.groups.map(group => h('div', { key: group.root }, h('p', null, group.title || group.root),
+      task.groups.map(group => h('div', { key: group.root, className: 'cm-task-detail-group' }, h('p', null, group.title || group.root),
         !task.results[group.root] && group.members.map(member => h('p', { key: member.id, className: 'cm-muted' },
           (member.parent ? t('关联对话 ', 'Related conversation ') : t('对话 ', 'Conversation ')) + member.id + ' · ' + (task.checkpoints[member.id]?.status ?? t('未完成', 'Unfinished')))),
         task.results[group.root] && h(GroupRow, { group: task.results[group.root] }),
@@ -212,7 +216,7 @@ function SessionDetails({ details, actions, close, cwdMap, setCwdMap, onWithdraw
     h('details', null, h('summary', null, t('技术信息', 'Technical details')), h('p', null, t('源 ID：', 'Source ID: ') + details.root), h('p', null, t('目标 ID：', 'Target ID: ') + details.target),
       details.members.map(member => h('div', { key: member.id }, h('p', null, (member.parent ? t('关联对话（所属对话 ', 'Related conversation (owner ') + member.parent + '）：' : t('对话：', 'Conversation: ')) + member.id + ' · ' + member.path),
         member.cutoff && h('p', null, t('冻结截止：', 'Snapshot: ') + member.cutoff.turns + t(' 轮 · 源第 ', ' turns · source line ') + member.cutoff.line + t(' 行 · ', ' · ') + date(member.cutoff.at)))),
-      result && h(GroupRow, { group: result })), (details.imported || detail?.imported) && button(t('撤回此对话', 'Withdraw this conversation'), () => onWithdraw({ root: details.root })), button(t('收起详情', 'Collapse details'), close))
+      result && h(GroupRow, { group: result })), h('div', { className: 'cm-row cm-detail-actions' }, (details.imported || detail?.imported) && button(t('撤回此对话', 'Withdraw this conversation'), () => onWithdraw({ root: details.root })), button(t('收起详情', 'Collapse details'), close)))
 }
 
 function CleanupPanel({ actions, pending, active, scope }) {
@@ -253,6 +257,11 @@ function CleanupPanel({ actions, pending, active, scope }) {
     preview && !submitted && h('div', { className: 'cm-details' },
       !preview.rows.length && h('p', null, t('当前范围没有可核验且可删除的导入对话。', 'No verified imports available for withdrawal.')),
       preview.skipped > 0 && h('p', null, t('有 ', 'There are ') + preview.skipped + t(' 条导入记录无法核验，已排除。', ' unverified import records excluded.')),
+      preview.rows.length > 0 && h('label', { className: 'cm-select-page' },
+        h('input', { type: 'checkbox', checked: groups.length === preview.rows.length,
+          ref: node => { if (node) node.indeterminate = groups.length > 0 && groups.length < preview.rows.length },
+          onChange: event => { setConfirmed(false); setSelected(event.target.checked ? preview.rows.map(row => row.root) : []) } }),
+        t('全选当前范围', 'Select all in scope') + ' (' + preview.rows.length + ')'),
       preview.rows.map(group => h('div', { key: group.root, className: 'cm-cleanup-row' },
         h('label', null, h('input', { type: 'checkbox', checked: selected.includes(group.root),
           onChange: e => { setConfirmed(false); setSelected(e.target.checked ? [...selected, group.root] : selected.filter(id => id !== group.root)) } }), group.title),
@@ -353,7 +362,7 @@ function MigrationPage({ actions }) {
           data?.scanError && h('p', { role: 'alert' }, data.scanError),
           h('div', { className: 'cm-row cm-filters' }, h('input', { value: search, placeholder: t('搜索标题、对话 ID、路径', 'Search by title, conversation ID or path'), 'aria-label': t('搜索对话', 'Search conversations'),
             onChange: e => { setSearch(e.target.value); changeQuery({ search: e.target.value }) } }),
-            h('select', { value: filter, 'aria-label': t('状态筛选', 'Filter by status'), onChange: e => { setFilter(e.target.value); changeQuery({ filter: e.target.value }) } },
+            selectControl({ value: filter, 'aria-label': t('状态筛选', 'Filter by status'), onChange: e => { setFilter(e.target.value); changeQuery({ filter: e.target.value }) } },
               Object.entries({ all: t('全部状态', 'All statuses'), actionable: t('全部可执行', 'All eligible'), pending: t('待导入', 'Ready to import'), incremental: t('可增量', 'Updates available'), unchanged: t('无新增', 'Up to date'), attention: t('需处理', 'Needs attention') })
                 .map(([value, text]) => h('option', { key: value, value }, text))),
             h('details', { className: 'cm-filter-menu', onKeyDown: e => {
@@ -369,9 +378,9 @@ function MigrationPage({ actions }) {
                     onChange: e => changeQuery({ types: e.target.checked ? [...visibleTypes, key] : visibleTypes.filter(type => type !== key) }) }), label))),
                 button(t('恢复默认', 'Restore defaults'), () => { setArchived(false); changeQuery({ archived: false, hideActive: false, types: Object.keys(types()) }) })))),
           h('div', { className: 'cm-row cm-filters' },
-            h('label', null, t('项目目录 ', 'Project directory '), h('select', { value: q.projectDir || '', onChange: e => changeQuery({ projectDir: e.target.value }) },
+            h('label', null, t('项目目录 ', 'Project directory '), selectControl({ value: q.projectDir || '', onChange: e => changeQuery({ projectDir: e.target.value }) },
               h('option', { value: '' }, t('全部目录', 'All directories')), (data?.directories ?? []).map(dir => h('option', { key: dir, value: dir }, dir)))),
-            h('label', null, t('最近活动 ', 'Recent activity '), h('select', { value: q.period || '', onChange: e => changeQuery({ period: e.target.value }) },
+            h('label', null, t('最近活动 ', 'Recent activity '), selectControl({ value: q.period || '', onChange: e => changeQuery({ period: e.target.value }) },
               Object.entries({ '': t('不限时间', 'Any time'), '7': t('最近 7 天', 'Last 7 days'), '30': t('最近 30 天', 'Last 30 days'), custom: t('自定义日期', 'Custom dates') }).map(([value, label]) => h('option', { key: value, value }, label)))),
             q.period === 'custom' && h('label', null, t('从 ', 'From '), h('input', { type: 'date', value: q.from || '', max: q.to || undefined, onChange: e => changeQuery({ from: e.target.value }) })),
             q.period === 'custom' && h('label', null, t('至 ', 'To '), h('input', { type: 'date', value: q.to || '', min: q.from || undefined, onChange: e => changeQuery({ to: e.target.value }) }))),
