@@ -90,7 +90,7 @@ async function build(ctx, source, parsed, action, before, header, title, runtime
 export async function importSession(ctx, source, options) {
   const { meta } = source
   const id = targetId(meta.id)
-  const parsed = splitTurns(source)
+  const parsed = source.parsed ?? splitTurns(source)
   const title = titleFor(source, options.title)
   const dependencyList = dependencies(source, configuredServers(ctx))
   const original = await directory(meta.cwd)

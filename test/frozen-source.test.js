@@ -44,7 +44,8 @@ test('a later start closes the frozen interrupted turn in preview and replay, in
   assert.equal(frozen.boundaryLine, prefix.length + 2)
   const { boundaryLine, ...legacy } = frozen
   const verify = source => {
-    const parsed = splitTurns(source)
+    const parsed = source.parsed
+    assert.deepEqual(parsed, splitTurns(source))
     assert.deepEqual(parsed.turns.map(turn => turn.reason), ['completed', 'interrupted'])
     assert.equal(parsed.hashes.at(-1), frozen.hash)
     assert.equal(source.rows.at(-1).row.payload.type, 'task_started')

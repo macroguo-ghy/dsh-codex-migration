@@ -5,7 +5,7 @@ import { splitTurns } from './source.js'
 export function conversationPreview(source) {
   const evidence = submissions(source.rows)
   let first, latest, reply
-  for (const turn of splitTurns(source).turns) {
+  for (const turn of (source.parsed ?? splitTurns(source)).turns) {
     const hasUser = turn.rows.some(({ row }) => row.type === 'response_item' && row.payload.type === 'message' && row.payload.role === 'user')
     const hasReply = turn.rows.some(({ row }) => row.type === 'response_item' && row.payload.type === 'message' && row.payload.role === 'assistant' && row.payload.phase !== 'commentary')
     for (const { row, lineNumber } of turn.rows) {

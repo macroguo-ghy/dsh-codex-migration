@@ -61,6 +61,14 @@ export async function load(node) {
   }
 }
 
+// Keep the parse bound to precisely the rows it describes. A trailing live
+// turn may be present in the file but excluded from the reviewed prefix.
+function frozenSource(source, parsed, last) {
+  if (source.rows.at(-1)?.lineNumber <= last) return { ...source, parsed }
+  const prefix = { ...source, rows: source.rows.filter(item => item.lineNumber <= last) }
+  return { ...prefix, parsed: splitTurns(prefix) }
+}
+
 async function loadMember(node, legacyLookahead = false) {
   if (node.error) throw new Error(node.error)
   let source
@@ -88,7 +96,7 @@ async function loadMember(node, legacyLookahead = false) {
       throw new Error('预览范围内的源历史被改写或截断，请重新扫描')
     }
     const last = lastTurn?.boundaryLine ?? lastTurn?.rows.at(-1)?.lineNumber ?? 1
-    source = { ...source, rows: source.rows.filter(item => item.lineNumber <= last) }
+    source = frozenSource(source, parsed, last)
   }
   return source
 }
@@ -111,7 +119,7 @@ export async function freezeMember(node, sources = undefined) {
   const source = await load(node), parsed = splitTurns(source)
   const lastTurn = parsed.turns.at(-1), lastRow = lastTurn?.rows.at(-1)
   const last = lastTurn?.boundaryLine ?? lastRow?.lineNumber ?? 1
-  sources?.set(node.id, { ...source, rows: source.rows.filter(item => item.lineNumber <= last) })
+  sources?.set(node.id, frozenSource(source, parsed, last))
   return { review: startsInReview(source), count: parsed.turns.length, hash: parsed.hashes.at(-1), metaHash: digest(JSON.stringify(source.meta)), recent: source.rows.at(-1)?.row.timestamp ?? source.meta.timestamp, line: lastRow?.lineNumber ?? source.rows[0]?.lineNumber, ...(lastTurn?.boundaryLine && { boundaryLine: lastTurn.boundaryLine }), cutoffAt: lastRow?.row.timestamp ?? source.meta.timestamp }
 }
 
@@ -151,7 +159,11 @@ export async function importGroup(ctx, group, options) {
   try {
     for (const node of group.members) {
       await options.onPhase?.(node.id, '读取源历史')
-      try { sources.set(node.id, options.previewSources?.get(node.id) ?? await load(node)) }
+      try {
+        const source = options.previewSources?.get(node.id) ?? await load(node)
+        source.parsed ??= splitTurns(source)
+        sources.set(node.id, source)
+      }
       catch (error) {
         if (error instanceof FrozenSourceError) return { root: group.root, status: '冲突', reason: error.message, results, failures }
         failures.push({ id: node.id, parent: node.parent, phase: '读取源历史', reason: error.message })
