@@ -55,7 +55,15 @@ export function applyMigrationUI(ctx) {
       const finished = previousActive && data.tasks.find(task => task.id === previousActive && !busy(task))
       emit({ data, error: null, ...(finished && { notice: t('Codex 迁移任务', 'Codex migration: ') + labels()[finished.state] + t('，在任务记录中查看结果。', '. See task history for results.') }) })
       previousActive = data.active
-      if (finished && !data.scanning) void call({ op: 'scan', sourceRoot: data.sourceRoot }).catch(() => {})
+      // Leave failed tasks available for a targeted retry, without starting a
+      // competing full-library scan as soon as the task ends.
+      if (finished && !data.scanning) {
+        if (query.retryOf && finished.retryOf === query.retryOf) {
+          void call({ op: 'retry', id: query.retryOf }).catch(() => {})
+        } else if (!query.retryOf && finished.groups.every(group => ['成功', '跳过'].includes(finished.results[group.root]?.status))) {
+          void call({ op: 'scan', sourceRoot: data.sourceRoot }).catch(() => {})
+        }
+      }
     } catch (error) { emit({ error: error.message }) }
     finally { polling = false; if (requestedRevision !== revision) void refresh() }
   }
@@ -72,7 +80,7 @@ export function applyMigrationUI(ctx) {
     },
     directories: paths => call({ op: 'directories', paths }),
     taskTargets: id => call({ op: 'task-targets', id }),
-    detail: id => call({ op: 'detail', id }),
+    detail: id => call({ op: 'detail', id, retryOf: query.retryOf }),
     refresh,
     open(id) {
       if (ctx.workspaces.list.getSnapshot().archivedSessionIds.includes(id)) {
@@ -309,14 +317,15 @@ function MigrationPage({ actions }) {
   const q = actions.querySnapshot()
   const visibleTypes = q.types ?? Object.keys(types())
   const adjusted = archived || q.hideActive || visibleTypes.length !== Object.keys(types()).length
-  const [cwd, setCwd] = useState(''), [cwdMap, setCwdMap] = useState({}), [details, setDetails] = useState(null), [retryOf, setRetryOf] = useState(null)
+  const [cwd, setCwd] = useState(''), [cwdMap, setCwdMap] = useState({}), [details, setDetails] = useState(null)
+  const retryOf = q.retryOf
   const [info, setInfo] = useState(''), initialized = useRef(false), requestId = useRef(null)
   useEffect(() => {
     if (!data || initialized.current) return
     initialized.current = true; setSource(data.sourceRoot)
-    if (!data.previewId && !data.scanning) void actions.run({ op: 'scan', sourceRoot: data.sourceRoot }).catch(() => {})
+    if (!q.retryOf && !data.previewId && !data.scanning) void actions.run({ op: 'scan', sourceRoot: data.sourceRoot }).catch(() => {})
   }, [data, actions])
-  const changeQuery = patch => { requestId.current = null; setInfo(selected.length ? t('筛选已更改，已清空选择。', 'Filters changed. Selection cleared.') : ''); setDetails(null); setSelected([]); setRetryOf(null); actions.query({ ...patch, page: 0 }) }
+  const changeQuery = patch => { requestId.current = null; setInfo(selected.length ? t('筛选已更改，已清空选择。', 'Filters changed. Selection cleared.') : ''); setDetails(null); setSelected([]); actions.query({ ...patch, page: 0 }) }
   const eligible = data?.eligible ?? []
   const choices = eligible.filter(item => selected.includes(item.id))
   const [validPaths, setValidPaths] = useState([])
@@ -345,10 +354,9 @@ function MigrationPage({ actions }) {
   }
   const retry = async task => {
     try {
-      await actions.run({ op: 'scan', sourceRoot: task.sourceRoot })
       const scope = await actions.run({ op: 'retry', id: task.id })
-      actions.query({ search: '', filter: 'all', archived: true, hideActive: false, types: Object.keys(types()), hideSide: false, hideReview: false, hideExec: false, hideAutomation: false, projectDir: '', period: '', from: '', to: '', page: 0 }); setSearch(''); setFilter('all'); setArchived(true)
-      setSource(task.sourceRoot); setSelected(scope.ids); setRetryOf(task.id); setTab('sessions')
+      actions.query({ retryOf: task.id, search: '', filter: 'all', archived: true, hideActive: false, types: Object.keys(types()), hideSide: false, hideReview: false, hideExec: false, hideAutomation: false, projectDir: '', period: '', from: '', to: '', page: 0 }); setSearch(''); setFilter('all'); setArchived(true)
+      setSource(task.sourceRoot); setSelected(scope.ids); setDetails(null); setTab('sessions')
       setInfo(t('已选择原任务失败或未完成的对话。等待扫描完成后检查新预览，再点击导入。', 'Unfinished conversations selected. Check the new preview after scanning, then import.'))
     } catch { /* Public action error is visible above. */ }
   }
@@ -371,9 +379,15 @@ function MigrationPage({ actions }) {
         : h('section', { role: 'tabpanel', id: 'cm-sessions', 'aria-labelledby': 'cm-sessions-tab' },
           h('div', { className: 'cm-source' }, h('label', null, t('Codex 来源目录（DSH 机器）', 'Codex source directory on the DSH host'),
             h('input', { value: source, onChange: e => setSource(e.target.value), placeholder: t('/绝对路径/.codex', '/absolute/path/.codex'), 'aria-label': t('Codex 来源目录', 'Codex source directory') })),
-            button(data?.scanning ? t('正在扫描…', 'Scanning…') : t('刷新预览', 'Refresh preview'), () => {
-              setSelected([]); setDetails(null); setRetryOf(null); void actions.run({ op: 'scan', sourceRoot: source }).catch(() => {})
-            }, pending || data?.scanning)),
+            button(data?.scanning ? t('正在扫描…', 'Scanning…') : retryOf ? t('刷新全部对话', 'Refresh all conversations') : t('刷新预览', 'Refresh preview'), () => {
+              setSelected([]); setDetails(null); setInfo(''); actions.query({ retryOf: undefined, page: 0 }); void actions.run({ op: 'scan', sourceRoot: source }).catch(() => {})
+            }, pending || data?.scanning),
+            retryOf && button(t('返回全部对话', 'Back to all conversations'), () => {
+              const root = data.librarySourceRoot || data.sourceRoot
+              setSource(root); setSelected([]); setDetails(null); setInfo('')
+              actions.query({ retryOf: undefined, page: 0 })
+              if (!data.libraryPreviewId) void actions.run({ op: 'scan', sourceRoot: root }).catch(() => {})
+            }, pending || data?.querying)),
           h('p', { className: 'cm-muted' }, t('预览来源：', 'Preview source: ') + (data?.sourceRoot ?? t('尚未读取', 'Not loaded')) + t(' · 上次完成：', ' · Last completed: ') + date(data?.scannedAt) + (data?.scanning ? t(' · 正在扫描并校验', ' · Scanning and verifying') : '')),
           data?.scanError && h('p', { role: 'alert' }, data.scanError),
           h('div', { className: 'cm-row cm-filters' }, h('input', { value: search, placeholder: t('搜索标题、对话 ID、路径', 'Search by title, conversation ID or path'), 'aria-label': t('搜索对话', 'Search conversations'),

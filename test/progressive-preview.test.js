@@ -101,3 +101,47 @@ test('upgrading invalidates old preflight results and rescans the selected sourc
   const restarted = await MigrationService.open({}, dir)
   try { assert.equal(restarted.view().previewId, id) } finally { await restarted.close() }
 })
+
+test('retry checks only unfinished groups against current sources and keeps the full preview intact', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'migration-retry-')))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const source = join(root, 'sessions')
+  await mkdir(source)
+  const write = (file, id, question, extra = {}) => writeFile(join(source, 'rollout-' + file + '.jsonl'),
+    lines([row('session_meta', { id, cwd: root, ...extra }), ...turn(question)]))
+  await write('parent', 'parent', 'original')
+  await write('other', 'other', 'successful group')
+  const inspected = new Set()
+  const service = await MigrationService.open({ get: () => undefined,
+    sessionPersistence: { async stat(id) { inspected.add(id) } } }, join(root, 'state'))
+  try {
+    await service.scan(root)
+    await service.scanPromise
+    const full = service.view()
+    const task = await service.store.create({ sourceRoot: root, groups: service.preview.rows.map(row => row.frozenGroup) })
+    await service.store.update(task, { results: { other: { status: '成功' }, parent: { status: '阻塞' } } })
+    await service.store.settle(task)
+    await write('child', 'child', 'new member', { parent_thread_id: 'parent', thread_source: 'subagent' })
+    inspected.clear()
+    const scope = await service.dispatch({ op: 'retry', id: task.id })
+    const query = { retryOf: task.id, archived: true }
+    assert.deepEqual(scope.ids, ['parent'])
+    await assert.rejects(service.submit({ ...scope }), /校验完成/)
+    await service.retryScan.done
+    assert.equal(service.view().previewId, full.previewId)
+    assert.equal(service.view().total, 2)
+    assert.deepEqual(service.view(query).rows.map(row => [row.root, row.children, row.status]), [['parent', 1, 'pending']])
+    assert.equal(inspected.size, 2)
+    const detail = await service.dispatch({ op: 'detail', id: 'parent', retryOf: task.id })
+    assert.equal(detail.members.length, 2)
+    await assert.rejects(service.submit({ ...scope, previewId: full.previewId }), /预览已更新/)
+    await assert.rejects(service.submit({ ...scope, ids: ['other'] }), /不在当前预览/)
+    await write('duplicate', 'parent', 'divergent history')
+    const next = await service.dispatch({ op: 'retry', id: task.id })
+    await service.retryScan.done
+    assert.notEqual(next.previewId, scope.previewId)
+    assert.equal(service.view(query).rows[0].status, 'blocked')
+    assert.equal(service.view().previewId, full.previewId)
+    await assert.rejects(service.submit(scope), /预览已更新/)
+  } finally { await service.close() }
+})
