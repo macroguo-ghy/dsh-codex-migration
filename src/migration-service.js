@@ -80,21 +80,21 @@ export class MigrationService {
     for (const group of task.groups) {
       if (task.results[group.root]) continue
       if (task.state !== 'running') break
-      await this.store.update(task, { currentGroup: group.root, currentMember: group.root, phase: '读取源历史' })
+      this.store.progress(task, group.root, group.root, '读取源历史')
       let result
       try {
         result = await importGroup(this.ctx, group, { execute: true, previewDetails: false, requireCwd: task.requireCwd !== false,
           titles: new Map(group.members.map(member => [member.id, member.title])), cwd: task.cwd[group.root], runtime: task.runtime,
           shouldPause: () => task.state !== 'running',
-          onPhase: (member, phase) => this.store.update(task, { currentMember: member, phase }),
-          onMember: (member, receipt) => this.store.update(task, { checkpoints: { ...task.checkpoints,
+          onPhase: (member, phase) => this.store.progress(task, group.root, member, phase),
+          onMember: (member, receipt) => this.store.update(task, { checkpoints: {
             [member]: { status: receipt.status, target: receipt.id, at: Date.now(),
               wrote: receipt.status === '成功' || task.checkpoints[member]?.wrote === true || task.checkpoints[member]?.status === '成功' } } }),
         })
       } catch (error) { result = { root: group.root, status: '失败', reason: errorReason(error), results: [], failures: [] } }
       if (result.paused) break
       if (result.status === '失败' && isOwned(result.reason)) result.status = '阻塞'
-      await this.store.update(task, { results: { ...task.results, [group.root]: result } })
+      await this.store.update(task, { results: { [group.root]: result } })
     }
     await this.store.settle(task)
   }
