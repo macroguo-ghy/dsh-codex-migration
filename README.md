@@ -10,7 +10,7 @@
 
 ```sh
 npm pack
-dsh plugin --profile web add ./dsh-codex-migration-0.4.1-beta.3.tgz
+dsh plugin --profile web add ./dsh-codex-migration-0.4.1-beta.4.tgz
 dsh web
 ```
 

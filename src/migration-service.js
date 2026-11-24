@@ -11,7 +11,7 @@ import { conversationPreview } from './conversation-preview.js'
 import { discoverGroups, freezeGroup, importGroup, load } from './groups.js'
 import { directory } from './import.js'
 
-const previewVersion = 1
+const previewVersion = 2
 const pending = new Set(['pending', 'incremental', 'cwd'])
 const cutoffOf = frozen => frozen && ({ turns: frozen.count, line: frozen.line, at: frozen.cutoffAt })
 const publicTask = task => ({ ...task, groups: task.groups.map(group => ({ root: group.root, title: group.title,

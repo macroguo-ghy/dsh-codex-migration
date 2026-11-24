@@ -61,11 +61,11 @@ export async function load(node) {
   }
 }
 
-async function loadMember(node) {
+async function loadMember(node, legacyLookahead = false) {
   if (node.error) throw new Error(node.error)
   let source
   for (const path of node.paths) {
-    const copy = await readRollout(path, node.frozen?.line)
+    const copy = await readRollout(path, node.frozen?.boundaryLine ?? node.frozen?.line, legacyLookahead)
     if (copy.meta.id !== node.id) throw new Error('扫描后源会话 ID 已变化')
     if (source) {
       if (copy.rows.every((x, i) => x.line === source.rows[i]?.line)) continue
@@ -75,10 +75,19 @@ async function loadMember(node) {
   }
   if (node.frozen) {
     const parsed = splitTurns(source), { count, hash, metaHash } = node.frozen
-    if (digest(JSON.stringify(source.meta)) !== metaHash || parsed.hashes[count] !== hash) {
+    // Older snapshots ended at the last content row. An interrupted turn can
+    // depend on the following start marker, which belongs to the next turn.
+    if (!legacyLookahead && !node.frozen.boundaryLine && parsed.turns.length === count - 1) {
+      return loadMember(node, true)
+    }
+    const lastTurn = parsed.turns[count - 1]
+    const boundaryMatches = legacyLookahead
+      ? lastTurn?.boundaryLine > node.frozen.line && lastTurn.rows.at(-1).lineNumber === node.frozen.line
+      : !node.frozen.boundaryLine || lastTurn?.boundaryLine === node.frozen.boundaryLine
+    if (!boundaryMatches || digest(JSON.stringify(source.meta)) !== metaHash || parsed.hashes[count] !== hash) {
       throw new Error('预览范围内的源历史被改写或截断，请重新扫描')
     }
-    const last = parsed.turns[count - 1]?.rows.at(-1)?.lineNumber ?? 1
+    const last = lastTurn?.boundaryLine ?? lastTurn?.rows.at(-1)?.lineNumber ?? 1
     source = { ...source, rows: source.rows.filter(item => item.lineNumber <= last) }
   }
   return source
@@ -100,9 +109,10 @@ function startsInReview(source) {
 
 export async function freezeMember(node, sources = undefined) {
   const source = await load(node), parsed = splitTurns(source)
-  const last = parsed.turns.at(-1)?.rows.at(-1)?.lineNumber ?? 1
+  const lastTurn = parsed.turns.at(-1), lastRow = lastTurn?.rows.at(-1)
+  const last = lastTurn?.boundaryLine ?? lastRow?.lineNumber ?? 1
   sources?.set(node.id, { ...source, rows: source.rows.filter(item => item.lineNumber <= last) })
-  return { review: startsInReview(source), count: parsed.turns.length, hash: parsed.hashes.at(-1), metaHash: digest(JSON.stringify(source.meta)), recent: source.rows.at(-1)?.row.timestamp ?? source.meta.timestamp, line: parsed.turns.at(-1)?.rows.at(-1)?.lineNumber ?? source.rows[0]?.lineNumber, cutoffAt: parsed.turns.at(-1)?.rows.at(-1)?.row.timestamp ?? source.meta.timestamp }
+  return { review: startsInReview(source), count: parsed.turns.length, hash: parsed.hashes.at(-1), metaHash: digest(JSON.stringify(source.meta)), recent: source.rows.at(-1)?.row.timestamp ?? source.meta.timestamp, line: lastRow?.lineNumber ?? source.rows[0]?.lineNumber, ...(lastTurn?.boundaryLine && { boundaryLine: lastTurn.boundaryLine }), cutoffAt: lastRow?.row.timestamp ?? source.meta.timestamp }
 }
 
 export async function freezeGroup(group, titles, sources = undefined) {

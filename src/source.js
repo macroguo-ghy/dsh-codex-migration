@@ -74,9 +74,15 @@ export async function rolloutId(path) {
   return (await rolloutMetadata(path)).id
 }
 
-export async function readRollout(path, throughLine) {
+export async function readRollout(path, throughLine, includeNextRecord = false) {
   const raw = path.endsWith('.zst') ? (await buffer(rolloutStream(path))).toString('utf8') : await readFile(path, 'utf8')
-  const lines = raw.split('\n').slice(0, throughLine)
+  const allLines = raw.split('\n')
+  let end = throughLine
+  if (includeNextRecord && end != null) {
+    while (end < allLines.length && !allLines[end].trim()) end++
+    end++
+  }
+  const lines = allLines.slice(0, end)
   const rows = []
   for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue
@@ -103,9 +109,9 @@ export function splitTurns(source) {
   let pending = []
   let started = false
   let hasAnswer = false
-  function finish(reason) {
+  function finish(reason, boundaryLine = undefined) {
     if (pending.some(({ row }) => row.type === 'response_item' || row.type === 'event_msg' && row.payload.type === 'user_message')) {
-      turns.push({ rows: pending, reason })
+      turns.push({ rows: pending, reason, boundaryLine })
     }
     pending = []
     hasAnswer = false
@@ -115,7 +121,7 @@ export function splitTurns(source) {
     const { type, payload } = item.row
     if (type === 'session_meta') continue
     if (type === 'event_msg' && ['task_started', 'turn_started'].includes(payload.type)) {
-      if (started || hasAnswer) finish('interrupted')
+      if (started || hasAnswer) finish('interrupted', item.lineNumber)
       started = true
     }
     if (!hasLifecycle && hasAnswer && type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
