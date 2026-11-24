@@ -1,6 +1,4 @@
-import { createInterface } from 'node:readline'
-import { createReadStream } from 'node:fs'
-import { readRollout, targetId, splitTurns, digest } from './source.js'
+import { rolloutMetadata, readRollout, targetId, splitTurns, digest } from './source.js'
 import { importSession, appendMetadata } from './import.js'
 import { refreshImportedSidebar } from './sidebar.js'
 
@@ -10,36 +8,23 @@ function parentOf(meta) {
   return child ? meta.parent_thread_id ?? spawn?.parent_thread_id ?? null : undefined
 }
 
-async function metadata(path) {
-  const stream = createReadStream(path, { encoding: 'utf8' }), reader = createInterface({ input: stream })
-  try {
-    for await (const line of reader) {
-      if (!line.trim()) continue
-      const row = JSON.parse(line)
-      if (row.type !== 'session_meta' || !row.payload?.id) throw new Error('首条记录缺少源会话 ID')
-      return row.payload
-    }
-    throw new Error('源会话为空')
-  } finally { reader.close(); stream.destroy() }
-}
-
 export async function discoverGroups(paths, selected, includeArchived) {
   const nodes = new Map(), issues = []
   for (const path of paths) {
     try {
-      const meta = await metadata(path), parent = parentOf(meta)
+      const meta = await rolloutMetadata(path), parent = parentOf(meta)
       const old = nodes.get(meta.id)
       if (old) {
         old.paths.push(path)
         if (parent !== old.parent) old.error = '同一源会话的父级归属相互矛盾'
       } else nodes.set(meta.id, { id: meta.id, meta, parent, paths: [path], children: [] })
     } catch (error) {
-      if (!selected.size || [...selected].some(id => path.endsWith('-' + id + '.jsonl'))) issues.push({ id: path.split('/').at(-1), reason: error instanceof SyntaxError ? '源元数据不是有效 JSON' : error.message })
+      if (!selected.size || [...selected].some(id => path.replace(/\.zst$/, '').endsWith('-' + id + '.jsonl'))) issues.push({ id: path.split('/').at(-1), reason: error instanceof SyntaxError ? '源元数据不是有效 JSON' : error.message })
     }
   }
   for (const node of nodes.values()) if (node.parent !== undefined) {
     const parent = nodes.get(node.parent)
-    if (!parent) node.error = '缺少父会话历史：' + String(node.parent)
+    if (!parent) node.error = node.parent ? '未找到对应的父会话，父会话 ID 为 ' + node.parent : '源记录缺少父会话 ID，无法归组'
     else parent.children.push(node)
   }
   const groups = []
@@ -99,19 +84,35 @@ async function loadMember(node) {
   return source
 }
 
-export async function freezeMember(node) {
-  const source = await load(node), parsed = splitTurns(source)
-  return { count: parsed.turns.length, hash: parsed.hashes.at(-1), metaHash: digest(JSON.stringify(source.meta)), recent: source.rows.at(-1)?.row.timestamp ?? source.meta.timestamp, line: parsed.turns.at(-1)?.rows.at(-1)?.lineNumber ?? source.rows[0]?.lineNumber, cutoffAt: parsed.turns.at(-1)?.rows.at(-1)?.row.timestamp ?? source.meta.timestamp }
+function startsInReview(source) {
+  if (source.meta.source?.subagent === 'review') return true
+  for (const { row } of source.rows) {
+    const p = row.payload
+    if (row.type === 'event_msg') {
+      if (p.type === 'entered_review_mode' ||
+          (['item_started', 'item_completed'].includes(p.type) && p.item?.type === 'EnteredReviewMode')) return true
+      if (p.type === 'user_message' || (p.type === 'item_completed' && p.item?.type === 'UserMessage')) return false
+    }
+    if (row.type === 'response_item' && p.type === 'message' && ['user', 'assistant'].includes(p.role)) return false
+  }
+  return false
 }
 
-export async function freezeGroup(group, titles) {
+export async function freezeMember(node, sources = undefined) {
+  const source = await load(node), parsed = splitTurns(source)
+  const last = parsed.turns.at(-1)?.rows.at(-1)?.lineNumber ?? 1
+  sources?.set(node.id, { ...source, rows: source.rows.filter(item => item.lineNumber <= last) })
+  return { review: startsInReview(source), count: parsed.turns.length, hash: parsed.hashes.at(-1), metaHash: digest(JSON.stringify(source.meta)), recent: source.rows.at(-1)?.row.timestamp ?? source.meta.timestamp, line: parsed.turns.at(-1)?.rows.at(-1)?.lineNumber ?? source.rows[0]?.lineNumber, cutoffAt: parsed.turns.at(-1)?.rows.at(-1)?.row.timestamp ?? source.meta.timestamp }
+}
+
+export async function freezeGroup(group, titles, sources = undefined) {
   const members = []
   for (const node of group.members) {
     let frozen, error = node.error
-    try { frozen = await freezeMember(node) } catch (cause) { error = cause.message }
+    try { frozen = await freezeMember(node, sources) } catch (cause) { error = cause.message }
     const { id, cwd, timestamp, agent_path, agent_role } = node.meta
     members.push({ id: node.id, parent: node.parent, depth: node.depth, paths: node.paths,
-      meta: { id, cwd, timestamp, agent_path, agent_role }, title: titles.get(node.id), frozen, error })
+      subagent: node.meta.thread_source === 'subagent' || !!node.meta.source?.subagent?.thread_spawn, meta: { id, cwd, timestamp, agent_path, agent_role }, title: titles.get(node.id), frozen, error })
   }
   return { root: group.root, members }
 }
@@ -139,7 +140,7 @@ export async function importGroup(ctx, group, options) {
   try {
     for (const node of group.members) {
       await options.onPhase?.(node.id, '读取源历史')
-      try { sources.set(node.id, await load(node)) }
+      try { sources.set(node.id, options.previewSources?.get(node.id) ?? await load(node)) }
       catch (error) {
         if (error instanceof FrozenSourceError) return { root: group.root, status: '冲突', reason: error.message, results, failures }
         failures.push({ id: node.id, parent: node.parent, phase: '读取源历史', reason: error.message })

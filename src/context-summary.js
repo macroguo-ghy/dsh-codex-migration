@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
+import { filteredHistoryMessage, isFilteredHistory, quoteHistory } from './filtered-history.js'
 import { currentChoice, writeChoice } from './context-workflow.js'
 
 const BLOCK = 'plugin:codex-migration/summary-block'
@@ -72,8 +73,23 @@ function segmentsFor(ctx, state, includeHumans) {
   // user's questions. Keep it verbatim when affordable; a huge last answer is
   // still eligible for summary, rather than blocking the whole migration.
   let resultBudget = Math.min(8000, recentBudget)
+  // Apply retention policy to the original speakers inside a bulk replacement.
+  // The replacement itself is a historical quotation on the native surface.
+  const history = nodes.slice(0, tail).map(node => {
+    if (!isFilteredHistory(node.event)) return { node, parts: [node] }
+    const parts = []
+    for (const seq of node.event.sourceEventSeqs) {
+      const message = filteredHistoryMessage(state.session, seq)
+      if (message?.content.length) {
+        parts.push({ seq, message, event: state.session.eventAt(seq) })
+        prices.set(seq, ctx.tokenMeter.estimateMessage(message))
+      }
+    }
+    return { node, parts }
+  })
+  const newestFirst = history.flatMap(entry => entry.parts).reverse()
   const recentResults = new Set()
-  for (const node of [...nodes.slice(0, tail)].reverse().filter(node => node.message?.role === 'assistant'
+  for (const node of newestFirst.filter(node => node.message?.role === 'assistant'
     && node.message.content.some(block => block.type === 'text'))) {
     const tokens = prices.get(node.seq)
     if (tokens > resultBudget) break
@@ -81,7 +97,7 @@ function segmentsFor(ctx, state, includeHumans) {
     resultBudget -= tokens
   }
   const recent = new Set()
-  for (const node of [...nodes.slice(0, tail)].reverse().filter(node => human(node.message))) {
+  for (const node of newestFirst.filter(node => human(node.message))) {
     const tokens = prices.get(node.seq)
     if (tokens > recentBudget) break
     recent.add(node.seq)
@@ -89,14 +105,19 @@ function segmentsFor(ctx, state, includeHumans) {
   }
   const segments = []
   let current
-  for (const [index, node] of nodes.entries()) {
-    const protectedNode = index >= tail || alwaysProtected(node) || recentResults.has(node.seq)
-      || human(node.message) && (!includeHumans || recent.has(node.seq))
-    if (protectedNode) { current = undefined; continue }
-    if (!current) { current = { seqs: [], units: [] }; segments.push(current) }
+  for (const { node, parts } of history) {
+    if (alwaysProtected(node)) { current = undefined; continue }
+    const keep = part => recentResults.has(part.seq) || human(part.message) && (!includeHumans || recent.has(part.seq))
+    const retained = parts.filter(keep)
+    if (retained.length && retained.length === parts.length) { current = undefined; continue }
+    if (!current) { current = { seqs: [], units: [], keepSeqs: [] }; segments.push(current) }
     current.seqs.push(node.seq)
-    if (node.message && node.message.content.length) current.units.push({ seq: node.seq, role: node.message.role,
-      source: node.message.source.kind, time: new Date(node.event.time).toISOString(), text: messageText(node.message), from: 0 })
+    for (const part of parts) {
+      if (keep(part)) current.keepSeqs.push(part.seq)
+      else if (part.message?.content.length) current.units.push({ seq: part.seq, role: part.message.role,
+        source: part.message.source.kind, time: new Date(part.event.time).toISOString(), text: messageText(part.message), from: 0 })
+    }
+    if (retained.length) current = undefined
   }
   return segments.filter(segment => segment.units.some(unit => unit.text.length))
 }
@@ -219,9 +240,15 @@ function projectedEstimate(ctx, state, segments, text) {
   const selected = new Set(segments.flatMap(segment => segment.seqs))
   const removed = measurement.nodes.filter(node => selected.has(node.seq)).reduce((sum, node) => sum + node.tokens, 0)
   const source = { kind: 'codex-imported-context', form: 'notice' }
-  const summary = ctx.tokenMeter.estimateMessage({ id: 'summary', role: 'user', source, content: [{ type: 'text', text }] })
-  const marker = ctx.tokenMeter.estimateMessage({ id: 'marker', role: 'user', source, content: [{ type: 'text', text: '[这段历史已纳入前述摘要，完整原记录仍保留。]' }] })
-  return Math.ceil((measurement.totalTokens - removed + summary + marker * (segments.length - 1)) * FACTOR)
+  const replacements = segments.reduce((sum, segment, index) => sum + ctx.tokenMeter.estimateMessage({
+    id: 'summary', role: 'user', source, content: summaryContent(state.session, segment, index, text),
+  }), 0)
+  return Math.ceil((measurement.totalTokens - removed + replacements) * FACTOR)
+}
+
+function summaryContent(session, segment, index, text) {
+  return [{ type: 'text', text: index === 0 ? text : '[这段历史已纳入前述摘要，完整原记录仍保留。]' },
+    ...quoteHistory(session, segment.keepSeqs ?? [])]
 }
 
 export async function recoverSummary(ctx, state) {
@@ -241,7 +268,7 @@ export async function recoverSummary(ctx, state) {
     const shadowedTokenCount = measurement.nodes.filter(node => segment.seqs.includes(node.seq)).reduce((sum, node) => sum + node.heuristicTokens, 0)
     session.append('compaction/prune', { shadowedRange: { start: segment.seqs[0], end: segment.seqs.at(-1) }, shadowedSeqs: segment.seqs, shadowedTokenCount })
     session.append('user/message', { id, role: 'user', source: { kind: 'codex-imported-context', form: 'notice' },
-      content: [{ type: 'text', text: index === 0 ? plan.data.text : '[这段历史已纳入前述摘要，完整原记录仍保留。]' }] },
+      content: summaryContent(session, segment, index, plan.data.text) },
     { surfaceOp: { op: 'replace', startSeq: segment.seqs[0], endSeq: segment.seqs.at(-1) }, sourceEventSeqs: segment.seqs })
   }
   appendPluginRecord(session, COMMITTED, { id: plan.data.id, phase: plan.data.phase, sources: plan.data.segments.map(segment => segment.seqs) })
@@ -270,7 +297,7 @@ async function chunks(ctx, state, signal) {
     signal.throwIfAborted()
     const id = hash({ version: VERSION, phase, segments: segments.map(segment => segment.seqs), text })
     appendPluginRecord(state.session, COMMIT, { id, phase, text, resultIds: results.map(result => result.id),
-      segments: segments.map(segment => ({ seqs: segment.seqs })) })
+      segments: segments.map(({ seqs, keepSeqs }) => ({ seqs, ...(keepSeqs.length && { keepSeqs }) })) })
     await ctx.sessions.flush(state.session)
     await recoverSummary(ctx, state)
     return

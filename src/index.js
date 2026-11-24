@@ -7,7 +7,7 @@ import { backfillImportedSidebar } from './sidebar.js'
 import { parseArgs } from 'node:util'
 import { discover } from './source.js'
 import { discoverGroups, importGroup } from './groups.js'
-import { cleanupCommand } from './cleanup-command.js'
+import { cleanupCommand, cleanupPending, executeCleanup, previewCleanup } from './cleanup-command.js'
 import { pruneBackedUpWorkspaces } from './workspaces.js'
 
 export const name = 'codex-migration'
@@ -81,7 +81,16 @@ export function apply(ctx) {
   const active = new Set()
   const migration = MigrationService.open(ctx)
   void migration.catch(error => ctx.logger.warn('codex-migration: ' + error.message))
-  ctx.plugin(CodexMigration, { dispatch: input => migration.then(service => service.dispatch(input)) })
+  ctx.plugin(CodexMigration, { dispatch: async input => {
+    const service = await migration
+    if (input.op === 'cleanup-preview') return previewCleanup(service, input)
+    if (input.op === 'cleanup-execute') {
+      await workspaceCleanup
+      return executeCleanup(ctx, service, input, () => active.size > 0 || service.busy() || contextBusy())
+    }
+    if (cleanupPending() && ['submit', 'continue'].includes(input.op)) throw new Error('正在撤回导入，请等待 Web 重启。')
+    return service.dispatch(input)
+  } })
   const workspaceCleanup = ctx.loader.await().then(() => pruneBackedUpWorkspaces(ctx)).catch(error => {
     ctx.logger.warn('codex-migration: ' + error.message)
   })
@@ -94,12 +103,11 @@ export function apply(ctx) {
     yield ctx.commands.register({
       definitionId: 'dsh-codex-migration/cleanup',
       name: 'cleanup-codex',
-      description: 'Preview or back up imported Codex conversations',
-      input: { hint: '[--execute，执行会重启 DSH Web]' },
+      description: 'Open the withdrawal workflow for imported Codex conversations',
+      input: { hint: '在迁移页面选择会话' },
       async handler(invocation) {
         await workspaceCleanup
-        const service = await migration
-        return cleanupCommand(ctx, invocation, () => active.size > 0 || service.busy() || contextBusy())
+        return cleanupCommand(invocation)
       },
     })
     yield ctx.commands.register({
@@ -108,6 +116,7 @@ export function apply(ctx) {
       description: 'Preview or import Codex conversations',
       input: { hint: '[会话 ID … | --all] [--archived] [--execute] [--cwd 路径]' },
       handler(invocation) {
+        if (cleanupPending()) return { kind: 'error', text: '正在撤回导入，请等待 Web 重启。' }
         const run = workspaceCleanup.then(async () => {
           const { report, ...result } = await runCommand(ctx, invocation.rawInput, invocation.signal,
             invocation.agent.session.header.cwd, invocation.agent.model.current(), await migration)

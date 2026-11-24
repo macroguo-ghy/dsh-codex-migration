@@ -1,5 +1,6 @@
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { quoteHistory } from './filtered-history.js'
 import { installContextWorkflow, currentChoice, writeChoice } from './context-workflow.js'
 
 // This local, model-free retry rebuilds a LOOP request from the changed native
@@ -14,6 +15,7 @@ function limits(ctx, state, request) {
   if (!Number.isSafeInteger(window) || window <= 0) throw new Error('无法确认模型生效窗口，首次 Codex 续聊已停止。请配置或选择已知的大窗口模型。')
   const outputReserve = request.maxTokens ?? 0
   const margin = Math.min(2048, Math.ceil(window * 0.01))
+  let compressionLimit
   let threshold = window - outputReserve
   const engine = ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? agent.ctx.get('compaction')
   if (engine) {
@@ -25,53 +27,50 @@ function limits(ctx, state, request) {
       const override = policy.modelPolicies.find(p => p.provider === request.provider && p.model === request.model)
       const ratio = override?.thresholdRatio ?? policy.thresholdRatio
       const headroom = override?.headroomTokens ?? policy.headroomTokens
-      threshold = Math.min(threshold, Math.floor(Math.min(window * ratio, window - outputReserve - headroom)) - 1)
+      compressionLimit = { ratio, headroom, trigger: Math.floor(Math.min(window * ratio, window - outputReserve - headroom)) }
+      threshold = Math.min(threshold, compressionLimit.trigger - 1)
     }
   }
   if (!Number.isFinite(threshold)) throw new Error('无法确认首次 Codex 续聊预算，请检查模型窗口和压缩配置。')
-  return { window, outputReserve, margin, threshold, budget: threshold - margin }
+  return { window, outputReserve, ...(compressionLimit && { compressionLimit }), margin, threshold, budget: threshold - margin }
 }
 
 function candidates(session, checkpoint, measurement) {
   const prices = new Map(measurement.nodes.map(node => [node.seq, node]))
-  const importedResults = new Set(session.snapshotEvents(0, checkpoint + 1)
-    .filter(event => event.type === 'tool/result').map(event => event.data.message.id))
-  const results = new Map()
+  const imported = new Set()
+  let inBatch = false
+  for (const event of session.snapshotEvents(0, checkpoint + 1)) {
+    if (event.type === 'codex-migration/begin') inBatch = true
+    else if (event.type === 'codex-migration/checkpoint') inBatch = false
+    else if (inBatch && ['assistant/message', 'tool/result'].includes(event.type)) imported.add(event.data.message.id)
+  }
+  const traces = [], results = new Map()
   for (const seq of session.surface.nodes) {
     const event = session.eventAt(seq)
-    // Native pruning can give an imported result a newer seq. Its immutable
-    // identity and turn still identify it; call IDs may repeat in later turns.
-    if (event.type === 'tool/result' && importedResults.has(event.data.message.id)) {
-      results.set(event.data.turn + ':' + event.data.message.toolCallId, event)
+    if (!imported.has(event.data.message?.id)) continue
+    if (event.type === 'tool/result') {
+      const msg = event.data.message
+      results.set(event.data.turn + ':' + msg.toolCallId, { callId: msg.toolCallId, name: msg.toolName || '工具结果',
+        resultSeq: seq, turn: event.data.turn, time: event.time, tokens: prices.get(seq)?.tokens ?? 0 })
+    } else if (event.type === 'assistant/message') {
+      const content = session.deriveEventMessage(event)?.content ?? []
+      for (const block of content) if (block.type === 'tool-call') {
+        traces.push({ callId: block.id, name: block.name, assistantSeq: seq, resultSeq: undefined,
+          turn: event.data.turn, time: event.time, tokens: prices.get(seq)?.tokens ?? 0 })
+      }
     }
   }
-  const pairs = []
-  for (const seq of session.surface.nodes) {
-    const event = session.eventAt(seq)
-    if (seq > checkpoint || event.type !== 'assistant/message' || event.data.message.source.provider !== 'codex') continue
-    const content = session.deriveEventMessage(event)?.content
-    // Never shadow a message containing prose or readable reasoning. New imports
-    // give reasoning its own native message before each tool-only message.
-    if (content?.length !== 1 || content[0].type !== 'tool-call') continue
-    const call = content[0], result = results.get(event.data.turn + ':' + call.id)
-    if (!result || !prices.has(seq) || !prices.has(result.seq)) continue
-    pairs.push({ callId: call.id, name: call.name, assistantSeq: seq, resultSeq: result.seq,
-      turn: event.data.turn, time: event.time,
-      tokens: prices.get(seq).tokens + prices.get(result.seq).tokens })
+  for (const trace of traces) {
+    const key = trace.turn + ':' + trace.callId, result = results.get(key)
+    if (result) { trace.resultSeq = result.resultSeq; trace.tokens += result.tokens; results.delete(key) }
   }
-  return pairs
+  return [...traces, ...results.values()]
 }
 
-function omissionNotice(pairs, id) {
-  const counts = new Map()
-  for (const pair of pairs) counts.set(pair.name, (counts.get(pair.name) ?? 0) + 1)
-  const names = [...counts].slice(0, 32).map(([name, count]) => name.slice(0, 80) + ' × ' + count).join('；')
-    + (counts.size > 32 ? '；另有 ' + (counts.size - 32) + ' 类工具（见完整省略记录）' : '')
+function omissionNotice(id) {
   return { id, role: 'user', source: { kind: 'codex-imported-context', form: 'notice' }, content: [{ type: 'text',
-    text: '[Codex 迁移续聊上下文] 已省略 ' + pairs.length + ' 对旧工具调用与结果，未生成摘要。'
-      + '真人 prompt 和历史模型正文原文保留，可读推理及完整工具原记录仍保存在会话历史中。'
-      + '省略范围：原历史第 ' + pairs[0].turn + '–' + pairs.at(-1).turn + ' 轮；' + names + '。'
-      + '省略的工具内容不能作为已经掌握的事实；需要时用当前工具重新核实。完整原记录仍在会话历史中。' }] }
+    text: '[Codex 迁移续聊上下文] 已省略全部旧工具调用与结果，未生成摘要。完整记录可在会话历史中查看。'
+      + '仅使用本轮提供的工具及参数；需要工具结果时请重新核实。' }] }
 }
 
 function tooLarge(estimated, budget) {
@@ -80,57 +79,73 @@ function tooLarge(estimated, budget) {
     + ' token（已计入输出预留和原生自动压缩阈值）。请换更大上下文窗口的模型或提高生效窗口后重试；未发送模型请求，也未生成摘要。')
 }
 
-function prepare(ctx, state, turn, step) {
+function prepare(ctx, state, turn, step, summarizing) {
   const { session, checkpoint, pending } = state
   const meter = ctx.tokenMeter
   const measurement = meter.measure(session)
-  const available = candidates(session, checkpoint, measurement)
-  const omitted = []
-  let remaining = measurement.totalTokens, notice
-  for (const pair of available) {
-    omitted.push(pair)
-    remaining -= pair.tokens
-    notice = omissionNotice(omitted, 'codex-omitted-tools-' + session.seq)
-    if (Math.ceil((remaining + meter.estimateMessage(notice)) * FACTOR) <= pending.budget) break
+  const omitted = candidates(session, checkpoint, measurement)
+  if (!omitted.length) {
+    if (summarizing) return
+    throw tooLarge(Math.ceil(measurement.totalTokens * FACTOR), pending.budget)
   }
-  if (!omitted.length) throw tooLarge(Math.ceil(remaining * FACTOR), pending.budget)
+  const notice = omissionNotice('codex-omitted-tools-' + session.seq)
   const plan = { ...pending, checkpoint, preparationId: session.seq, omitted, notice,
-    retainedPairs: available.length - omitted.length }
+    allImportedTools: true, retainedPairs: 0 }
   appendPluginRecord(session, BEGIN, plan)
   finishPreparation(ctx, state, plan, turn, step)
   const estimated = Math.ceil(meter.measure(session).totalTokens * FACTOR)
   state.pending = undefined
-  if (estimated > pending.budget) throw tooLarge(estimated, pending.budget)
+  if (!summarizing && estimated > pending.budget) throw tooLarge(estimated, pending.budget)
 }
 
 function finishPreparation(ctx, state, plan, turn, step) {
   const { session } = state
   const meter = ctx.tokenMeter
-  const measurement = meter.measure(session)
-  const prices = new Map(measurement.nodes.map(node => [node.seq, node]))
-  const current = new Map(session.surface.nodes.map(seq => {
-    const event = session.eventAt(seq)
-    const message = event.type === 'user/message' ? event.data : event.data.message
-    return [message.id, event]
-  }))
-  // Recovery finds current identities, including native tool-result rewrites.
-  // A crash between the two replacements is completed before a new request.
-  // No owner-specific interpreter is needed to reconstruct either replacement.
   const { omitted, notice } = plan
-  for (const pair of omitted) {
-    for (const originalSeq of [pair.assistantSeq, pair.resultSeq]) {
-      const original = session.eventAt(originalSeq)
-      const event = current.get(original.data.message.id)
-      if (!event) continue
-      const seq = event.seq, price = prices.get(seq)
-      session.append('compaction/prune', { shadowedRange: { start: seq, end: seq }, shadowedSeqs: [seq], shadowedTokenCount: price.heuristicTokens })
-      session.append('developer/message', { turn, step, message: {
-        id: 'codex-omitted-node-' + seq, role: 'developer', content: [], source: { kind: 'codex-imported-context', form: 'notice' },
-      } }, { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] })
-      current.delete(original.data.message.id)
+  const targets = new Set(omitted.flatMap(pair => [pair.assistantSeq, pair.resultSeq]).filter(Number.isInteger))
+  // Only compact a contiguous run of migration-owned nodes. Native messages,
+  // the system head, and earlier summary replacements remain independent.
+  const imported = new Set()
+  let inBatch = false
+  for (const event of session.snapshotEvents(0, plan.checkpoint + 1)) {
+    if (event.type === 'codex-migration/begin') inBatch = true
+    else if (event.type === 'codex-migration/checkpoint') inBatch = false
+    else if (inBatch && event.surfaceOp === 'append' && event.type !== 'system/message') imported.add(event.seq)
+  }
+  // A native rewrite can move a tool result beyond its original import batch.
+  const targetIds = new Set([...targets].map(seq => session.eventAt(seq).data.message.id))
+  const nodes = [...session.surface.nodes]
+  let first = -1, last = -1
+  function replaceRun() {
+    if (first < 0) return
+    const seqs = nodes.slice(first, last + 1)
+    const content = quoteHistory(session, seqs)
+    const replace = { surfaceOp: { op: /** @type {const} */ ('replace'), startSeq: seqs[0], endSeq: seqs.at(-1) }, sourceEventSeqs: seqs }
+    // The native range replacement is the atomic commit. A retry sees only
+    // the replacement, so it cannot apply the same range twice.
+    if (content.length) session.append('user/message', {
+      id: 'codex-filtered-history-' + seqs[0], role: 'user', source: { kind: 'codex-imported-context', form: 'notice' },
+      content,
+    }, replace)
+    else session.append('developer/message', { turn, step, message: {
+      id: 'codex-omitted-node-' + seqs[0], role: 'developer', content: [], source: { kind: 'codex-imported-context', form: 'notice' },
+    } }, replace)
+    first = last = -1
+  }
+  for (const [index, seq] of nodes.entries()) {
+    const event = session.eventAt(seq)
+    if (targetIds.has(event.data.message?.id)) {
+      if (first < 0) first = index
+      last = index
+    } else if (!imported.has(seq) || (!plan.allImportedTools &&
+      (event.type === 'tool/result' || event.data.message?.content.some(block => block.type === 'tool-call')))) {
+      // Older unfinished plans can select only a subset of the tool calls.
+      // Preserve unselected calls as native nodes until a fresh admission.
+      replaceRun()
     }
   }
-  if (!current.has(notice.id)) session.append('user/message', notice, { surfaceOp: 'append' })
+  replaceRun()
+  if (!nodes.some(seq => session.eventAt(seq).data.id === notice.id)) session.append('user/message', notice, { surfaceOp: 'append' })
   const estimated = Math.ceil(meter.measure(session).totalTokens * FACTOR)
   const { notice: _notice, ...receipt } = plan
   appendPluginRecord(session, 'plugin:codex-migration/request-budget', {
@@ -214,8 +229,9 @@ export function installInitialContext(ctx) {
     }
     if (!isAgentLoopRequest(request)) return yield* next()
     const envelope = limits(ctx, state, request)
-    const estimated = Math.ceil(ctx.tokenMeter.measure(state.session).totalTokens * FACTOR)
-    if (estimated > envelope.budget || currentChoice(state.session)?.status === 'summarizing') {
+    const measurement = ctx.tokenMeter.measure(state.session)
+    const estimated = Math.ceil(measurement.totalTokens * FACTOR)
+    if (candidates(state.session, state.checkpoint, measurement).length || estimated > envelope.budget || currentChoice(state.session)?.status === 'summarizing') {
       state.pending = envelope
       yield { type: 'finish', reason: { kind: 'error', failure: { code: PREPARE, message: '正在准备迁移历史的续聊上下文' } } }
       return
@@ -233,16 +249,16 @@ export function installInitialContext(ctx) {
       throw new Error('请换更大上下文窗口模型，或在续聊选择卡片中选择摘要后续聊。')
     }
     if (failure.code !== PREPARE || !state?.pending || state.ready) return next()
-    if (currentChoice(agent.session)?.status === 'summarizing') {
-      await workflow.summarize(state, signal)
-      state.pending = undefined
-      return { kind: 'retry' }
-    }
-    try { prepare(ctx, state, turn, step) }
+    const summarizing = currentChoice(agent.session)?.status === 'summarizing'
+    try { prepare(ctx, state, turn, step, summarizing) }
     catch (error) {
       if (!error.message.startsWith('首次 Codex 续聊上下文仍超限')) throw error
       workflow.offer(state, state.pending ?? limits(ctx, state, agent.session.requestHeader().config), error.message)
       throw new Error('请换更大上下文窗口模型，或在续聊选择卡片中选择摘要后续聊。')
+    }
+    if (summarizing) {
+      await workflow.summarize(state, signal)
+      state.pending = undefined
     }
     return { kind: 'retry' }
   }, { prepend: true })

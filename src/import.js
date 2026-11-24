@@ -57,7 +57,7 @@ async function build(ctx, source, parsed, action, before, header, title, runtime
   const gaps = new MigrationReport(source.path)
   const marker = { version: 1, source: source.meta.id, count: action.stop, hash: parsed.hashes[action.stop] }
   // A retry of a partially written old batch must reproduce its exact events.
-  const conversionVersion = action.recovery ? action.recovery.data.conversionVersion ?? 1 : 5
+  const conversionVersion = action.recovery ? action.recovery.data.conversionVersion ?? 1 : 6
   const extraEvents = action.recovery?.data.extraEvents
   runtime = action.recovery ? action.recovery.data.runtime : runtime
   emit(BEGIN, { ...marker, ...(conversionVersion > 1 && { conversionVersion }), title, originalCwd: extraEvents ? action.recovery.data.originalCwd : source.meta.cwd ?? null,

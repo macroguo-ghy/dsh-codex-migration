@@ -54,3 +54,29 @@ test('budget card remains outside folded analysis and loads an unloaded pair by 
   records = records.slice(0, 1)
   await assert.rejects(() => readOriginal({ assistantSeq: 13, resultSeq: 50 }), /原记录不完整/)
 })
+
+test('automatic continuation exclusively renders one status line for current and legacy notices', async () => {
+  const { resumeInstruction, resumeStatus, resumeIdPrefix } = await import('../src/resume-notice.js')
+  let plugin, def, render
+  const kind = 'codex-migration-resume-status'
+  vm.runInNewContext(await readFile(new URL('../src/client-bundle.js', import.meta.url), 'utf8'), {
+    window: { __ModuleLoader__: { load(bundle) { plugin = bundle.factory(() => ({ createElement: (tag, props, ...children) => ({ tag, children }) })) } } },
+  })
+  const ctx = { effect: fn => fn(), remote: { $mount: async () => {} },
+    uiConversation: { events: { register(d) { if (d.kind === kind) def = d } } },
+    slots: { inject: (_, fn) => fn(), register(d, component) { if (d.key === kind) render = component } } }
+  ctx.plugin = child => { if (child.inject.includes('remote.session')) child.apply(ctx) }
+  await plugin.apply(ctx)
+  const event = { type: 'user/message', surfaceOp: 'append', data: { id: 'old-uuid', source: { kind: 'codex-imported-context', form: 'notice' },
+    content: [{ type: 'text', text: resumeInstruction }] } }
+  assert.equal(def.match(event).exclusive, true)
+  assert.equal(render().tag, 'p')
+  assert.deepEqual(render().children, [resumeStatus])
+  event.data.content[0].text = 'another notice'
+  assert.equal(def.match(event), null)
+  event.data.id = resumeIdPrefix + 'uuid'
+  assert.equal(def.match(event).exclusive, true)
+  event.data.source.kind = 'user'
+  event.data.content[0].text = resumeInstruction
+  assert.equal(def.match(event), null)
+})

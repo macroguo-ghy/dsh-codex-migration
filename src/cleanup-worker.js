@@ -1,19 +1,23 @@
 import { execFile } from 'node:child_process'
-import { writeFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import { promisify } from 'node:util'
-import { moveSessions, scan } from './cleanup.js'
+import { deleteVerified } from './withdraw.js'
+import { atomicJSON } from './tasks.js'
 
 const exec = promisify(execFile)
-const [pidText, home, service, expected] = process.argv.slice(2)
+const [pidText, home, service] = process.argv.slice(2)
 const pid = Number(pidText)
 const launchers = join(homedir(), '.local', 'bin')
 const options = { timeout: 30_000, env: { ...process.env, DSH_HOME: home } }
-const status = text => writeFile(join(home, 'codex-cleanup-status.json'), JSON.stringify({ text }), { mode: 0o600 })
+let requestId
+const status = text => writeFile(join(home, 'codex-cleanup-status.json'), JSON.stringify({ text, requestId }), { mode: 0o600 })
 let stopped = false
 try {
+  const request = JSON.parse(await readFile(join(home, 'codex-delete-request.json'), 'utf8'))
+  requestId = request.requestId
   await setTimeout(1200)
   const { stdout } = await exec('/bin/launchctl', ['print', service], options)
   if (Number(stdout.match(/^\s*pid = (\d+)/m)?.[1]) !== pid) throw new Error('Web 进程已更换，清理取消。')
@@ -29,16 +33,21 @@ try {
     await setTimeout(250)
   }
   if (!exited) throw new Error('旧 Web 进程尚未退出，清理取消。')
-  const { candidates } = await scan(join(home, 'sessions'))
-  if (candidates.length !== Number(expected)) throw new Error('导入会话数量在执行前发生变化，清理取消。')
-  const { moved, backup, failures } = await moveSessions(home, candidates)
-  await status('已移出 ' + moved + ' / ' + expected + ' 条。备份目录：' + backup
-    + (failures.length ? '\n移动失败：' + failures.join('\n') : ''))
+
+  const { deleted, failures } = await deleteVerified(home, request)
+  const text = '已撤回 ' + (request.selection.length - failures.length) + ' 个对话。' + (failures.length ? '另有 ' + failures.length + ' 个对话未完整撤回，请重新预览。' : '')
+  await status(text)
+  if (request.taskId && /^task-[a-f0-9-]+$/.test(request.taskId)) {
+    const path = join(home, 'codex-migration', request.taskId + '.json')
+    const task = JSON.parse(await readFile(path, 'utf8'))
+    await atomicJSON(path, { ...task, withdrawals: [...(task.withdrawals ?? []), { at: Date.now(), text, deleted }] })
+  }
 } catch (error) {
   await status('清理未完成。' + error.message)
 } finally {
+  await rm(join(home, 'codex-delete-request.json'), { force: true }).catch(() => {})
   if (stopped) {
     try { await exec(join(launchers, 'dsh-start'), [], options) }
-    catch { await status('Web 重启失败。请手动运行 dsh-start，已移动的会话可在 migration-backups 下查找。') }
+    catch { await status((await readFile(join(home, 'codex-cleanup-status.json'), 'utf8').then(JSON.parse)).text + ' Web 重启失败，请手动运行 dsh-start。') }
   }
 }

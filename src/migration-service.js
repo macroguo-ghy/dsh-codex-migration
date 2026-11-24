@@ -4,9 +4,11 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { taskScope } from './withdraw.js'
 import { TaskStore, atomicJSON } from './tasks.js'
 import { discover, targetId } from './source.js'
-import { discoverGroups, freezeGroup, importGroup } from './groups.js'
+import { conversationPreview } from './conversation-preview.js'
+import { discoverGroups, freezeGroup, importGroup, load } from './groups.js'
 import { directory } from './import.js'
 
 const pending = new Set(['pending', 'incremental', 'cwd'])
@@ -16,7 +18,31 @@ const publicTask = task => ({ ...task, groups: task.groups.map(group => ({ root:
 const errorReason = explainError
 export function filtered(rows, query = {}) {
   const search = String(query.search ?? '').toLowerCase()
-  return rows.filter(row => (query.archived || !row.archived)
+  const directory = query.projectDir && resolve(query.projectDir)
+  let start, end
+  if (query.period === '7' || query.period === '30') {
+    const today = new Date()
+    end = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1).getTime()
+    start = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1 - Number(query.period)).getTime()
+  } else if (query.period === 'custom') {
+    if (query.from) start = Date.parse(query.from + 'T00:00:00')
+    if (query.to) {
+      const lastDay = new Date(query.to + 'T00:00:00')
+      end = lastDay.setDate(lastDay.getDate() + 1)
+    }
+  }
+  function matchesType(row) {
+    const flags = { side: row.sideConversation, automation: row.automation, review: row.review, exec: row.execSource }
+    if (Array.isArray(query.types)) {
+      const applicable = Object.keys(flags).filter(key => flags[key])
+      return (applicable.length ? applicable : ['ordinary']).some(key => query.types.includes(key))
+    }
+    return !(query.hideSide && flags.side || query.hideAutomation && flags.automation || query.hideReview && flags.review || query.hideExec && flags.exec)
+  }
+  return rows.filter(row => (row.archived ? query.archived : !query.hideActive) && matchesType(row)
+    && (!directory || (row.cwd && (row.cwd === directory || row.cwd.startsWith(directory === '/' ? '/' : directory + '/'))))
+    && (start === undefined || Date.parse(row.recent) >= start)
+    && (end === undefined || Date.parse(row.recent) < end)
     && (!query.filter || query.filter === 'all' || (query.filter === 'actionable' ? pending.has(row.status)
       : query.filter === 'attention' ? ['cwd', 'blocked'].includes(row.status) : row.status === query.filter))
     && (!search || [row.title, row.root, row.cwd, ...row.members.map(member => member.id)].join(' ').toLowerCase().includes(search)))
@@ -29,6 +55,7 @@ export class MigrationService {
   scanning = false
   scanError
   scanPromise
+  progress
   runs = new Set()
   disposed = false
   constructor(ctx, store) { this.ctx = ctx; this.store = store }
@@ -36,6 +63,7 @@ export class MigrationService {
     const store = await TaskStore.open(dir), service = new MigrationService(ctx, store)
     try { service.preview = JSON.parse(await readFile(join(dir, 'preview.json'), 'utf8')) }
     catch (error) { if (error.code !== 'ENOENT') service.scanError = '上次预览缓存不可用，请重新扫描' }
+    if (service.preview?.rows.some(row => typeof row.sideConversation !== 'boolean' || typeof row.automation !== 'boolean' || typeof row.review !== 'boolean' || typeof row.execSource !== 'boolean')) service.preview = undefined
     return service
   }
   busy() { return !!this.store.active() }
@@ -60,7 +88,8 @@ export class MigrationService {
           shouldPause: () => task.state !== 'running',
           onPhase: (member, phase) => this.store.update(task, { currentMember: member, phase }),
           onMember: (member, receipt) => this.store.update(task, { checkpoints: { ...task.checkpoints,
-            [member]: { status: receipt.status, target: receipt.id, at: Date.now() } } }),
+            [member]: { status: receipt.status, target: receipt.id, at: Date.now(),
+              wrote: receipt.status === '成功' || task.checkpoints[member]?.wrote === true || task.checkpoints[member]?.status === '成功' } } }),
         })
       } catch (error) { result = { root: group.root, status: '失败', reason: errorReason(error), results: [], failures: [] } }
       if (result.paused) break
@@ -80,13 +109,22 @@ export class MigrationService {
     this.scanPromise = (async () => {
       const { paths, titles } = await discover(true, root)
       const { groups, issues } = await discoverGroups(paths, new Set(), true)
-      const rows = []
-      for (const group of groups) {
+      const rows = groups.map(group => {
+        const first = group.members[0]
+        return { root: group.root, title: titles.get(group.root) || group.root, cwd: first.meta.cwd ?? '',
+          recent: first.meta.timestamp ?? '', archived: first.paths.every(path => path.includes('/archived_sessions/')),
+          execSource: first.meta.source === 'exec' || (first.meta.source == null && first.meta.originator === 'codex_exec'),
+          review: first.meta.source?.subagent === 'review', automation: first.meta.thread_source === 'automation', sideConversation: first.meta.attached_thread === true, status: 'checking', children: group.members.length - 1, target: targetId(group.root),
+          members: group.members.map(node => ({ id: node.id, parent: node.parent, path: node.paths[0], depth: node.depth })) }
+      })
+      this.progress = { id: randomUUID(), sourceRoot: root, rows, issues }
+      for (const [index, group] of groups.entries()) {
         if (this.disposed) return
         let result, frozenGroup
         try {
-          frozenGroup = await freezeGroup(group, titles)
-          result = await importGroup(this.ctx, frozenGroup, { execute: false, titles })
+          const previewSources = new Map()
+          frozenGroup = await freezeGroup(group, titles, previewSources)
+          result = await importGroup(this.ctx, frozenGroup, { execute: false, titles, previewSources, previewDetails: false })
         } catch (error) { result = { root: group.root, status: '失败', reason: errorReason(error), results: [], failures: [] } }
         const first = group.members[0], member = result.results.find(item => item.source === group.root)
         const exists = await this.ctx.sessionPersistence.stat(targetId(group.root))
@@ -96,35 +134,40 @@ export class MigrationService {
         if (owned) result.reason = busyReason
         const status = owned ? 'blocked' : result.status === '跳过' ? 'unchanged' : result.status !== '待导入' ? 'blocked'
           : missingCwd ? 'cwd' : result.results.some(item => item.status === '增量导入' || item.status === '恢复导入') ? 'incremental' : 'pending'
-        rows.push({ root: group.root, title: member?.title || titles.get(group.root) || group.root,
+        Object.assign(rows[index], { review: rows[index].review || frozenGroup?.members[0]?.frozen?.review === true, root: group.root, title: member?.title || titles.get(group.root) || group.root,
           cwd: first.meta.cwd ?? '', recent: frozenGroup?.members[0]?.frozen?.recent ?? first.meta.timestamp ?? '', archived: first.paths.every(path => path.includes('/archived_sessions/')),
           status, turns: frozenGroup?.members.reduce((sum, node) => sum + (node.frozen?.count ?? 0), 0) ?? 0,
           children: group.members.length - 1, members: group.members.map(node => ({ id: node.id, parent: node.parent, path: node.paths[0], depth: node.depth, cutoff: cutoffOf(frozenGroup?.members.find(member => member.id === node.id)?.frozen) })),
           reason: result.reason ?? result.failures.map(failure => failure.reason).join('；'),
           notices: result.results.map(member => member.analysis?.summary.length ?? 0).reduce((sum, count) => sum + count, 0),
-          result, frozenGroup, missingCwd, target: targetId(group.root) })
+          imported: !!exists, result, lazyDetail: true, frozenGroup, missingCwd, target: targetId(group.root) })
       }
       rows.sort((a, b) => b.recent.localeCompare(a.recent))
-      const preview = { id: randomUUID(), sourceRoot: root, scannedAt: Date.now(), rows, issues }
+      const preview = { ...this.progress, scannedAt: Date.now() }
       await atomicJSON(join(this.store.dir, 'preview.json'), preview)
       this.preview = preview
-    })().catch(error => { this.scanError = errorReason(error) }).finally(() => { this.scanning = false })
+    })().catch(error => { this.scanError = errorReason(error) }).finally(() => { this.scanning = false; this.progress = undefined })
   }
   view(query = {}) {
-    const rows = filtered(this.preview?.rows ?? [], query)
+    const visible = this.progress ?? this.preview
+    const rows = filtered(visible?.rows ?? [], query)
     const page = Math.max(0, Number(query.page) || 0), size = 20
-    return { previewId: this.preview?.id, sourceRoot: this.preview?.sourceRoot ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
+    return { previewId: visible?.id, sourceRoot: visible?.sourceRoot ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
       scannedAt: this.preview?.scannedAt, scanning: this.scanning, scanError: this.scanError,
+      directories: [...new Set((visible?.rows ?? []).map(row => row.cwd).filter(Boolean))].sort(),
+      eligible: rows.filter(row => pending.has(row.status)).map(row => ({ id: row.root, cwd: row.status === 'cwd' })),
       total: rows.length, actionable: rows.filter(row => pending.has(row.status)).length,
-      counts: Object.fromEntries(['pending', 'incremental', 'unchanged', 'cwd', 'blocked'].map(status => [status, rows.filter(row => row.status === status).length])),
+      counts: Object.fromEntries(['checking', 'pending', 'incremental', 'unchanged', 'cwd', 'blocked'].map(status => [status, rows.filter(row => row.status === status).length])),
       page, rows: rows.slice(page * size, (page + 1) * size).map(({ frozenGroup, result, ...row }) => row),
-      issues: this.preview?.issues ?? [], tasks: this.store.list().map(publicTask), active: this.store.active()?.id }
+      issues: visible?.issues ?? [], tasks: this.store.list().map(publicTask), active: this.store.active()?.id }
   }
   async submit(input) {
     const duplicate = input.requestId && this.store.list().find(task => task.requestId === input.requestId)
     if (duplicate) return publicTask(duplicate)
+    if (this.scanning) throw new Error('正在扫描，请等待校验完成')
     const preview = this.preview
     if (!preview || input.previewId !== preview.id) throw new Error('预览已更新，请重新检查当前范围后导入')
+    if (input.requireReady && !input.ids?.length) throw new Error('请选择要导入的对话')
     const scope = input.ids?.length ? preview.rows.filter(row => input.ids.includes(row.root)) : filtered(preview.rows, input.query)
     if (input.ids?.some(id => !scope.some(row => row.root === id))) throw new Error('选择的会话不在当前预览内')
     const rows = scope.filter(row => pending.has(row.status))
@@ -132,6 +175,7 @@ export class MigrationService {
     const cwd = { ...(input.cwd ?? {}) }, blocked = {}
     for (const row of rows) if (row.missingCwd) {
       cwd[row.root] = await directory(cwd[row.root] || input.batchCwd)
+      if (!cwd[row.root] && input.requireReady) throw new Error('替代工作目录无效，请重新指定后导入。')
       if (!cwd[row.root]) blocked[row.root] = { root: row.root, status: '阻塞', reason: '缺少有效工作目录。选择 DSH 机器上已存在的绝对目录后重试此项。', results: [], failures: [] }
     }
     // Request ID makes a lost submit response safe to retry across reconnections.
@@ -146,9 +190,41 @@ export class MigrationService {
       case 'scan': await this.scan(input.sourceRoot); return this.view(input.query)
       case 'state': return this.view(input.query)
       case 'detail': {
-        const row = this.preview?.rows.find(row => row.root === input.id)
+        const row = (this.progress ?? this.preview)?.rows.find(row => row.root === input.id)
         if (!row) throw new Error('未找到会话，请重新扫描')
-        const { frozenGroup, ...detail } = row; return detail
+        const { frozenGroup, ...detail } = row
+        const previewSources = new Map()
+        if (detail.imported === undefined) detail.imported = !!await this.ctx.sessionPersistence.stat(targetId(row.root))
+        detail.subagents = frozenGroup?.members.filter(member => member.id !== row.root && (member.meta?.agent_path || member.meta?.agent_role || member.subagent)).length
+        const parent = frozenGroup?.members.find(member => member.id === row.root)
+        if (parent) {
+          try {
+            const source = await load(parent)
+            previewSources.set(row.root, source)
+            detail.messages = conversationPreview(source)
+          } catch (error) { detail.previewError = errorReason(error) }
+        }
+        if (row.lazyDetail && frozenGroup) {
+          const titles = new Map(frozenGroup.members.map(member => [member.id, member.title]))
+          detail.result = await importGroup(this.ctx, frozenGroup, { execute: false, titles, previewSources })
+          if (row.result?.reason && !detail.result.reason) detail.result.reason = row.result.reason
+        }
+        return detail
+      }
+      case 'directories': {
+        const valid = []
+        for (const path of new Set(input.paths)) if (typeof path === 'string' && await directory(path)) valid.push(path)
+        return valid
+      }
+      case 'task-targets': {
+        const task = this.store.get(input.id)
+        const { written, current, withdrawn } = await taskScope(this.store, task)
+        const targets = {}
+        for (const group of task.groups) {
+          const id = targetId(group.root)
+          if ((current.includes(group.root) || task.results[group.root]?.status === '跳过') && await this.ctx.sessionPersistence.stat(id)) targets[group.root] = id
+        }
+        return { targets, written, withdrawn }
       }
       case 'submit': return this.submit(input)
       case 'task': return publicTask(this.store.get(input.id))

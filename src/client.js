@@ -1,5 +1,6 @@
+import { resumeIdPrefix, resumeInstruction, resumeStatus } from './resume-notice.js'
 import { createElement as h, useState } from 'react'
-import { DisclosureRow, Button, IconContextInjectionOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DisclosureRow, Button, IconContextInjectionOutlineRegular } from './ui-controls.js'
 import styles from './client.css'
 
 export const inject = ['slots', 'uiConversation', 'remote', 'remote.session', 'remote.commands']
@@ -7,6 +8,23 @@ export const inject = ['slots', 'uiConversation', 'remote', 'remote.session', 'r
 const kind = 'codex-migration-budget'
 const reportKind = 'codex-migration-report'
 const choiceKind = 'codex-migration-context-choice'
+
+function initialBudgetNote(data, number) {
+  const limit = data.compressionLimit
+  const parts = ['模型窗口是单次请求的总容量。首次续聊预算是本次可带入的输入上限，单位均为 token。']
+  if (limit) {
+    parts.push('DSH 取以下两项中较小的值作为自动压缩触发线：窗口的 ' + number(limit.ratio * 100) + '%，或窗口扣除输出预留 ' + number(data.outputReserve) + ' 和压缩预留 ' + number(limit.headroom) + '。本次触发线为 ' + number(limit.trigger) + '，输入需低于该值。')
+  } else if (data.threshold < data.window - data.outputReserve) {
+    parts.push('本次 DSH 自动压缩触发线为 ' + number(data.threshold + 1) + '，输入需低于该值。')
+  }
+  if (Number.isFinite(data.threshold) && Number.isFinite(data.margin)) {
+    parts.push('首次续聊预算 = 输入上限 ' + number(data.threshold) + ' − 安全余量 ' + number(data.margin) + ' = ' + number(data.budget) + '。')
+  }
+  if (Number.isFinite(data.estimated) && data.estimated > data.budget) {
+    parts.push('准备阶段的输入估算超出预算 ' + number(data.estimated - data.budget) + ' token。')
+  }
+  return h('p', { className: 'dsh-codex-budget-note' }, parts.join(''))
+}
 
 function definition(kind, type) { return {
   kind,
@@ -31,6 +49,20 @@ export const choiceDefinition = {
   ...definition(choiceKind, 'plugin:codex-migration/context-choice'),
   match: event => event.type === 'plugin:codex-migration/context-choice' ? { id: event.data.id, role: 'start' } : null,
   update: (_context, match) => match.event.data,
+}
+
+const resumeKind = 'codex-migration-resume-status'
+const resumeDefinition = {
+  ...definition(resumeKind, 'user/message'),
+  match(event) {
+    if (event.type !== 'user/message' || event.surfaceOp !== 'append') return null
+    const { id, source, content } = event.data
+    if (source?.kind !== 'codex-imported-context' || source.form !== 'notice') return null
+    // Older followups used a plain UUID and can only be identified by their exact body.
+    const legacy = content.length === 1 && content[0].type === 'text' && content[0].text === resumeInstruction
+    return id.startsWith(resumeIdPrefix) || legacy ? { id, role: 'start', exclusive: true } : null
+  },
+  start: () => ({}),
 }
 
 const reasoningKind = 'codex-migration-reasoning-summary'
@@ -60,7 +92,7 @@ function ReasoningCard({ node }) {
   const [open, setOpen] = useState(false)
   return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
     h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: 'Codex 历史推理摘要',
-      open, expandable: true, expandOnRowClick: true, onToggle: () => setOpen(!open),
+      open, onToggle: () => setOpen(!open),
       collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, '可读摘要 ' + node.data.items.length + ' 条'),
     }, h('div', { className: 'dsh-codex-budget-body' },
       h('p', { className: 'dsh-codex-budget-note' }, 'Codex 保存的可读摘要，不是完整隐藏推理。此处展示不新增模型输入。'),
@@ -90,14 +122,15 @@ function ChoiceCard({ node, act, restore, inputActions, readSource }) {
   }
   return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
     h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: data.status === 'ready' ? '迁移续聊已恢复 · 准备阶段超限已解决' : '迁移续聊上下文',
-      open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true, onToggle: () => setOpen(value => !value),
+      open, keepContentWhenOpen: true, onToggle: () => setOpen(value => !value),
       collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
         data.status === 'ready' ? '已恢复续聊' : data.status === 'cancelled' ? '已取消，输入保留' : data.status === 'summarizing' ? '摘要准备中' : '需要选择续聊方式'),
     }, h('div', { className: 'dsh-codex-budget-body' },
       h('p', { className: 'dsh-codex-budget-note' }, data.reason),
       h('dl', { className: 'dsh-codex-budget-metrics' },
-        [['生效窗口', number(data.window)], ['输入估算 / 预算', number(data.estimated) + ' / ' + number(data.budget)],
+        [['模型总窗口', number(data.window)], ['输入估算 / 可用输入预算', number(data.estimated) + ' / ' + number(data.budget)],
           ['已省略旧工具', number(data.omitted) + ' 对']].map(([label, value]) => h('div', { key: label }, h('dt', null, label), h('dd', null, value)))),
+      initialBudgetNote(data, number),
       active && h('p', { className: 'dsh-codex-budget-note' }, '切换模型可保留更多原文。摘要会优先保留全部真人输入；仍放不下时摘要较早输入，近期输入保留原文。完整原记录始终保留。'),
       active && h('div', { className: 'dsh-codex-context-actions' },
         h(Button, { variant: 'secondary', size: 'sm', disabled: busy, onClick: () => run('models') }, '切换更大窗口模型'),
@@ -146,6 +179,8 @@ function BudgetCard({ node, readOriginal }) {
   const counts = new Map()
   for (const pair of omitted) counts.set(pair.name, (counts.get(pair.name) ?? 0) + 1)
   const number = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未记录'
+  const unit = omitted.every(pair => pair.assistantSeq != null && pair.resultSeq != null) ? ' 对' : ' 条'
+  const seqLabel = pair => [pair.assistantSeq, pair.resultSeq].filter(Number.isInteger).join('–')
   const retained = Number.isFinite(data.retainedPairs) ? '保留 ' + number(data.retainedPairs) + ' 对' : '保留数量未记录'
   const time = value => new Date(value).toLocaleString('zh-CN', { hour12: false })
   async function openOriginal(pair) {
@@ -161,10 +196,10 @@ function BudgetCard({ node, readOriginal }) {
     h('style', null, styles),
     h(DisclosureRow, {
       icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
-      title: data.phase === 'initial' ? '首次续聊准备' : '迁移续聊', open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+      title: data.phase === 'initial' ? '首次续聊准备' : '迁移续聊', open, keepContentWhenOpen: true,
       onToggle: () => setOpen(value => !value),
       collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
-        '已省略 ' + number(omitted.length) + ' 对工具轨迹'),
+        (data.allImportedTools ? '已省略全部 ' : '已省略 ') + number(omitted.length) + unit + '工具轨迹'),
     }, h('div', { className: 'dsh-codex-budget-body' },
       h('p', { className: 'dsh-codex-budget-note' },
         '真人输入和历史模型正文全部保留。工具记录来自旧 Codex 环境，当前工具能力以本轮提供的定义为准。'),
@@ -172,35 +207,36 @@ function BudgetCard({ node, readOriginal }) {
         '此步骤仅省略工具轨迹；摘要需要在续聊选择中明确选择。完整原记录仍可查看，首次续聊成功后使用 DSH 原生自动压缩。'),
       h('dl', { className: 'dsh-codex-budget-metrics' },
         [
-          ['生效窗口', number(data.window) + ' token'],
-          ['输入估算 / 预算', number(data.estimated) + ' / ' + number(data.budget)],
+          ['模型总窗口', number(data.window) + ' token'],
+          ['输入估算 / 可用输入预算', number(data.estimated) + ' / ' + number(data.budget)],
           ['输出预留', number(data.outputReserve) + ' token'],
           ...(data.phase === 'initial' ? [['首次上下文上界', number(data.threshold) + ' token']] : []),
           ['估算余量', number(data.margin) + ' token'],
-          ['工具轨迹', '省略 ' + number(omitted.length) + ' 对 · ' + retained],
+          ['工具轨迹', '省略 ' + number(omitted.length) + unit + ' · ' + retained],
         ].map(([label, value]) => h('div', { key: label }, h('dt', null, label), h('dd', null, value)))),
+      data.phase === 'initial' && initialBudgetNote(data, number),
       data.timeRange && h('p', { className: 'dsh-codex-budget-note' },
         '省略范围：' + time(data.timeRange.start) + ' — ' + time(data.timeRange.end)),
       counts.size > 0 && h('div', { className: 'dsh-codex-budget-tools' },
         [...counts].sort((a, b) => b[1] - a[1]).map(([name, count]) =>
-          h('span', { key: name }, h('code', null, name), h('span', null, number(count) + ' 对')))),
+          h('span', { key: name }, h('code', null, name), h('span', null, number(count) + unit)))),
       omitted.length > 0 && h(DisclosureRow, {
         icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
-        title: '查看省略的原工具记录', open: recordsOpen, expandable: true, expandOnRowClick: true,
+        title: '查看省略的原工具记录', open: recordsOpen,
         onToggle: () => setRecordsOpen(value => !value),
       }, h('div', { className: 'dsh-codex-budget-records' },
         h('div', { className: 'dsh-codex-budget-list' }, omitted.slice(0, limit).map((pair, index) =>
           h('div', { key: index, className: 'dsh-codex-budget-record' },
             h('code', null, pair.name),
-            h('span', { className: 'dsh-codex-budget-seq' }, 'seq ' + pair.assistantSeq + '–' + pair.resultSeq),
+            h('span', { className: 'dsh-codex-budget-seq' }, 'seq ' + seqLabel(pair)),
             h(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: () => openOriginal(pair),
-              'aria-label': '查看原记录 ' + pair.assistantSeq + '–' + pair.resultSeq }, '查看原记录')))),
+              'aria-label': '查看原记录 ' + seqLabel(pair) }, '查看原记录')))),
         limit < omitted.length && h(Button, {
           type: 'button', variant: 'ghost', size: 'sm', onClick: () => setLimit(value => value + 30),
         }, '显示更多（' + number(Math.min(limit, omitted.length)) + ' / ' + number(omitted.length) + '）'),
         original && h('section', { 'aria-label': '省略工具的完整原记录', className: 'dsh-codex-budget-original' },
           h('div', { className: 'dsh-codex-budget-note' },
-            original.pair.name + ' · seq ' + original.pair.assistantSeq + '–' + original.pair.resultSeq),
+            original.pair.name + ' · seq ' + seqLabel(original.pair)),
           original.loading ? h('p', null, '正在读取原记录…')
             : h('pre', { role: original.error ? 'alert' : undefined }, original.error ?? original.text)))))))
 
@@ -211,6 +247,10 @@ export function apply(ctx) {
   ctx.effect(() => ctx.uiConversation.events.register(reportDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(choiceDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(reasoningDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(resumeDefinition))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: resumeKind,
+  }, () => h('p', { className: 'dsh-codex-budget-note' }, resumeStatus)))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({ name: 'conversation.chat.node', key: reasoningKind }, ReasoningCard))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: choiceKind,
@@ -246,14 +286,15 @@ export function apply(ctx) {
     name: 'conversation.chat.node', key: kind,
     inject: sessionId => ({
       async readOriginal(pair, address) {
-        const results = await Promise.all([pair.assistantSeq, pair.resultSeq].map(seq => ctx.remote.session.page({
+        const seqs = [pair.assistantSeq, pair.resultSeq].filter(Number.isInteger)
+        const results = await Promise.all(seqs.map(seq => ctx.remote.session.page({
           address: address ?? { kind: 'session', sessionId }, throughSeq: seq,
           beforeSeq: seq + 1, maxMessages: 1,
         }, AbortSignal.timeout(15000))))
         for (const result of results) if (!result.ok) throw new Error(result.error.message)
         const records = new Map(results.flatMap(result => result.value.records.map(record => [record.event.seq, record.event])))
-        if (!records.has(pair.assistantSeq) || !records.has(pair.resultSeq)) throw new Error('原记录不完整，无法显示对应调用和结果')
-        return JSON.stringify([records.get(pair.assistantSeq), records.get(pair.resultSeq)], null, 2)
+        if (!seqs.length || seqs.some(seq => !records.has(seq))) throw new Error('原记录不完整，无法显示对应调用和结果')
+        return JSON.stringify(seqs.map(seq => records.get(seq)), null, 2)
       },
     }),
   }, BudgetCard))
@@ -286,8 +327,8 @@ function MemberDetails({ member }) {
 function MemberRow({ member }) {
   const [open, setOpen] = useState(false)
   return h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
-    title: member.title || member.source, open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
-    onToggle: () => setOpen(value => !value), collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, '子 agent · ' + member.status),
+    title: member.title || member.source, open, keepContentWhenOpen: true,
+    onToggle: () => setOpen(value => !value), collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, '关联对话 · ' + member.status),
   }, h(MemberDetails, { member }))
 }
 
@@ -295,7 +336,7 @@ export function GroupRow({ group }) {
   const [open, setOpen] = useState(false)
   const root = group.results.find(member => member.source === group.root)
   return h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }),
-    title: root?.title || group.root, open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+    title: root?.title || group.root, open, keepContentWhenOpen: true,
     onToggle: () => setOpen(value => !value), collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, group.status),
   }, h('div', { className: 'dsh-codex-budget-body' },
     group.reason && h('p', null, group.reason), root && h(MemberDetails, { member: root }),
@@ -309,7 +350,7 @@ function ReportCard({ node }) {
   const data = node.data
   return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
     h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: data.title,
-      open, expandable: true, expandOnRowClick: true, keepContentWhenOpen: true,
+      open, keepContentWhenOpen: true,
       onToggle: () => setOpen(value => !value),
       collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, data.summary),
     }, h('div', { className: 'dsh-codex-budget-body' },

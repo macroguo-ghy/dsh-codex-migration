@@ -70,6 +70,7 @@ export function apply(ctx) {
           await request({ op: 'scan' })
           const preview = await wait(async () => { const view = await request({ op: 'state' }); return !view.scanning && view })
           output.migration.preview = preview
+          if (input.migration.inspectDetail) output.migration.detail = await request({ op: 'detail', id: preview.rows[0].root })
           if (input.migration.rewrite) await writeFile(input.migration.rewrite.path, input.migration.rewrite.lines)
           if (input.migration.append) await appendFile(input.migration.append.path, input.migration.append.lines)
           if (input.migration.crashAfterWrite) {
@@ -105,6 +106,7 @@ export function apply(ctx) {
           const next = await request({ op: 'submit', previewId: state.previewId, requestId: 'after-end-' + randomUUID() })
           output.migration.task = await wait(async () => { const task = await request({ op: 'task', id: next.id }); return task.state === 'completed' && task })
         }
+        if (input.migration.withdrawPreview) output.migration.withdrawal = await request({ op: 'cleanup-preview', taskId: output.migration.task.id })
         output.migration.agents = ctx.agents.list().map(agent => agent.session.header.id)
       }
       if (input.command) {

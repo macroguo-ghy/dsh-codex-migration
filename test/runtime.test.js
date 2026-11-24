@@ -160,10 +160,11 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   assert.deepEqual(unchanged.sessions, increment.sessions)
   const continued = await run({ resume: first.header.id })
   const request = JSON.stringify(continued.requests)
-  for (const text of ['original user text', 'original assistant text', 'original tool result',
+  for (const text of ['original user text', 'original assistant text',
     'original reasoning summary', 'historical AGENTS.md content', 'automatically loaded skill', 'second user', 'native continuation prompt']) {
     assert.ok(request.includes(text), 'missing from continuation request: ' + text)
   }
+  assert.doesNotMatch(request, /original tool result/)
   assert.match(request, /Codex 历史工具说明/)
   assert.ok(JSON.stringify(continued.sessions).includes('native continuation answer'))
   const dshOnly = await run({ command: '/import-codex main --execute' })
@@ -251,7 +252,9 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   const mounted = await run({ command: '/import-codex workspace --execute' })
   assert.ok(mounted.workspaces.some(workspace => workspace.path === importedProject))
   const cleanup = join(repository, 'src', 'cleanup.js')
-  await exec(process.execPath, [cleanup, '--dsh-home', env.DSH_HOME, '--execute'], { cwd, env })
+  const inventory = await exec(process.execPath, [cleanup, '--dsh-home', env.DSH_HOME], { cwd, env })
+  for (const group of JSON.parse(inventory.stdout)) await exec(process.execPath,
+    [cleanup, '--dsh-home', env.DSH_HOME, '--execute', '--root', group.root, '--scope', group.scope, '--confirm-continued'], { cwd, env })
   const afterCleanup = await run({ command: '/cleanup-codex' })
   assert.deepEqual(afterCleanup.sessions, [])
   assert.ok(!afterCleanup.workspaces.some(workspace => workspace.path === importedProject))

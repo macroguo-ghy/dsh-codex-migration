@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import { createZstdDecompress } from 'node:zlib'
+import { buffer } from 'node:stream/consumers'
 import { createInterface } from 'node:readline'
 import { readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -16,7 +18,7 @@ async function* rollouts(dir) {
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) yield* rollouts(path)
-    else if (entry.isFile() && /^rollout-.*\.jsonl$/.test(entry.name)) yield path
+    else if (entry.isFile() && /^rollout-.*\.jsonl(?:\.zst)?$/.test(entry.name)) yield path
   }
 }
 
@@ -40,15 +42,24 @@ export async function discover(includeArchived, sourceRoot) {
   return { paths, titles }
 }
 
-export async function rolloutId(path) {
-  const stream = createReadStream(path, { encoding: 'utf8' })
+function rolloutStream(path) {
+  const input = createReadStream(path)
+  if (!path.endsWith('.zst')) return input
+  const decoder = createZstdDecompress()
+  input.on('error', error => decoder.destroy(error))
+  decoder.once('close', () => input.destroy())
+  return input.pipe(decoder)
+}
+
+export async function rolloutMetadata(path) {
+  const stream = rolloutStream(path)
   const reader = createInterface({ input: stream, crlfDelay: Infinity })
   try {
     for await (const line of reader) {
       if (!line.trim()) continue
       const record = JSON.parse(line)
       if (record.type === 'session_meta' && typeof record.payload?.id === 'string' && record.payload.id) {
-        return record.payload.id
+        return record.payload
       }
       throw new Error('首条记录缺少源会话 ID')
     }
@@ -59,8 +70,12 @@ export async function rolloutId(path) {
   }
 }
 
+export async function rolloutId(path) {
+  return (await rolloutMetadata(path)).id
+}
+
 export async function readRollout(path, throughLine) {
-  const raw = await readFile(path, 'utf8')
+  const raw = path.endsWith('.zst') ? (await buffer(rolloutStream(path))).toString('utf8') : await readFile(path, 'utf8')
   const lines = raw.split('\n').slice(0, throughLine)
   const rows = []
   for (const [index, line] of lines.entries()) {

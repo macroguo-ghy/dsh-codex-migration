@@ -4,6 +4,8 @@ import { basename, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { classifyParts, submissions } from './origin.js'
 
+import { withoutMemoryCitation } from './memory-citation.js'
+
 const text = value => ({ type: 'text', text: value })
 const images = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 const maxAttachmentBytes = 32 * 1024 * 1024
@@ -273,7 +275,9 @@ export async function convertTurns(ctx, source, turns, start, emit, gaps, conver
         continue
       }
       if (p.type === 'message' || p.type === 'user_message') {
-        const blocks = await content(p.content ?? p.message, cwd, store, gaps)
+        const raw = p.content ?? p.message
+        const value = conversionVersion >= 6 && p.role === 'assistant' && p.phase !== 'commentary' ? withoutMemoryCitation(raw) : raw
+        const blocks = value === '' && raw !== value ? [] : await content(value, cwd, store, gaps)
         if (!blocks.length) continue
         if (p.role === 'assistant') assistant(blocks, time)
         else if (p.role === 'user' || fallbackUser) {

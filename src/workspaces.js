@@ -46,7 +46,11 @@ export async function pruneBackedUpWorkspaces(ctx) {
     throw error
   })
   if (!files.length) return 0
-  const backedUp = new Set()
+  const deletion = await readFile(join(home, 'codex-withdraw-receipt.json'), 'utf8').then(JSON.parse).catch(error => {
+    if (error.code === 'ENOENT') return { deleted: [] }
+    throw error
+  })
+  const backedUp = new Set(deletion.deleted)
   const backups = join(home, 'migration-backups')
   for (const batch of await directories(backups)) {
     for (const workspace of await directories(join(backups, batch))) {
