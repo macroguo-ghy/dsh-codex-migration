@@ -98,7 +98,7 @@ export function apply(ctx) {
               return handle
             }
           }
-          const task = await request({ op: 'submit', previewId: preview.previewId, ids: input.migration.ids, requestId: 'probe-' + randomUUID() })
+          const task = await request({ op: 'submit', previewId: preview.previewId, ids: input.migration.ids, batchCwd: input.migration.batchCwd, requestId: 'probe-' + randomUUID() })
           output.migration.task = await wait(async () => {
             const current = await request({ op: 'task', id: task.id })
             return ['completed', 'paused', 'interrupted'].includes(current.state) && current

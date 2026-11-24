@@ -74,7 +74,13 @@ export function applyMigrationUI(ctx) {
     taskTargets: id => call({ op: 'task-targets', id }),
     detail: id => call({ op: 'detail', id }),
     refresh,
-    open: id => workspace.openSession(id),
+    open(id) {
+      if (ctx.workspaces.list.getSnapshot().archivedSessionIds.includes(id)) {
+        return t('此对话已在 DSH 归档。请在 DSH 侧栏取消归档后再打开。', 'This conversation is archived in DSH. Unarchive it in the DSH sidebar before opening.')
+      }
+      workspace.openSession(id)
+      return ''
+    },
     panel: () => layout.selectPanel(PANEL),
     dismiss: () => emit({ notice: null }),
   }
@@ -154,7 +160,7 @@ function TaskCard({ task, actions, onRetry, onWithdraw }) {
       ['running', 'pausing', 'paused', 'interrupted'].includes(task.state) && button(t('结束任务', 'End task'), () => act('end')),
       ['completed', 'ended'].includes(task.state) && task.groups.some(group => !['成功', '跳过'].includes(task.results[group.root]?.status))
         && button(t('重新预览失败项', 'Preview unfinished items'), () => onRetry(task)),
-      task.groups.length === 1 && availability?.targets[task.groups[0].root] && button(t('打开对话', 'Open conversation'), () => actions.open(availability.targets[task.groups[0].root])),
+      task.groups.length === 1 && availability?.targets[task.groups[0].root] && button(t('打开对话', 'Open conversation'), () => setFeedback(actions.open(availability.targets[task.groups[0].root]))),
       !!remaining && button(t('撤回导入', 'Withdraw import'), () => onWithdraw({ taskId: task.id })),
       button(t('复制诊断', 'Copy diagnostics'), () => { void copy() }), button(t('下载诊断', 'Download diagnostics'), download)),
     task.withdrawals?.map((item, i) => h('p', { key: i }, date(item.at) + ' · ' + withdrawalResult(item.text))),
@@ -166,7 +172,7 @@ function TaskCard({ task, actions, onRetry, onWithdraw }) {
           (member.parent ? t('关联对话 ', 'Related conversation ') : t('对话 ', 'Conversation ')) + member.id + ' · ' + (task.checkpoints[member.id]?.status ?? t('未完成', 'Unfinished')))),
         task.results[group.root] && h(GroupRow, { group: task.results[group.root] }),
         availability?.targets[group.root]
-          && button(t('打开 DSH 对话', 'Open DSH conversation'), () => actions.open(availability.targets[group.root]))))))
+          && button(t('打开 DSH 对话', 'Open DSH conversation'), () => setFeedback(actions.open(availability.targets[group.root])))))))
 }
 
 function MessageExcerpt({ message }) {
@@ -292,6 +298,14 @@ function MigrationPage({ actions }) {
   const { data, error, pending } = useSyncExternalStore(actions.subscribe, actions.get)
   const [tab, setTab] = useState(() => sessionStorage.getItem('cm-withdraw-request') ? 'cleanup' : 'sessions'), [search, setSearch] = useState(actions.querySnapshot().search), [filter, setFilter] = useState(actions.querySnapshot().filter)
   const [source, setSource] = useState(''), [archived, setArchived] = useState(actions.querySnapshot().archived), [selected, setSelected] = useState([])
+  const filters = useRef(null)
+  useEffect(() => {
+    const closeOutside = event => {
+      if (filters.current?.open && !filters.current.contains(event.target)) filters.current.open = false
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [])
   const q = actions.querySnapshot()
   const visibleTypes = q.types ?? Object.keys(types())
   const adjusted = archived || q.hideActive || visibleTypes.length !== Object.keys(types()).length
@@ -367,9 +381,9 @@ function MigrationPage({ actions }) {
             selectControl({ value: filter, 'aria-label': t('状态筛选', 'Filter by status'), onChange: e => { setFilter(e.target.value); changeQuery({ filter: e.target.value }) } },
               Object.entries({ all: t('全部状态', 'All statuses'), actionable: t('全部可执行', 'All eligible'), pending: t('待导入', 'Ready to import'), incremental: t('可增量', 'Updates available'), unchanged: t('无新增', 'Up to date'), attention: t('需处理', 'Needs attention') })
                 .map(([value, text]) => h('option', { key: value, value }, text))),
-            h('details', { className: 'cm-filter-menu', onKeyDown: e => {
+            h('details', { className: 'cm-filter-menu', ref: filters, onKeyDown: e => {
               if (e.key === 'Escape') { e.currentTarget.open = false; e.currentTarget.querySelector('summary').focus() }
-            }, onBlur: e => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.open = false } },
+            }, onBlur: e => { if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) e.currentTarget.open = false } },
               h('summary', null, adjusted ? t('筛选 · 已调整', 'Filters · modified') : t('筛选', 'Filters')),
               h('div', { className: 'cm-filter-popup' },
                 h('fieldset', null, h('legend', null, t('归档状态', 'Archive status')),

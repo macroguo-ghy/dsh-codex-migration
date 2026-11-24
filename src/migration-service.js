@@ -11,6 +11,7 @@ import { conversationPreview } from './conversation-preview.js'
 import { discoverGroups, freezeGroup, importGroup, load } from './groups.js'
 import { directory } from './import.js'
 
+const previewVersion = 1
 const pending = new Set(['pending', 'incremental', 'cwd'])
 const cutoffOf = frozen => frozen && ({ turns: frozen.count, line: frozen.line, at: frozen.cutoffAt })
 const publicTask = task => ({ ...task, groups: task.groups.map(group => ({ root: group.root, title: group.title,
@@ -52,6 +53,7 @@ export class MigrationService {
   ctx
   store
   preview
+  previousSourceRoot
   scanning = false
   scanError
   scanPromise
@@ -61,9 +63,11 @@ export class MigrationService {
   constructor(ctx, store) { this.ctx = ctx; this.store = store }
   static async open(ctx, dir = join(resolveDshHome(), 'codex-migration')) {
     const store = await TaskStore.open(dir), service = new MigrationService(ctx, store)
-    try { service.preview = JSON.parse(await readFile(join(dir, 'preview.json'), 'utf8')) }
-    catch (error) { if (error.code !== 'ENOENT') service.scanError = '上次预览缓存不可用，请重新扫描' }
-    if (service.preview?.rows.some(row => typeof row.sideConversation !== 'boolean' || typeof row.automation !== 'boolean' || typeof row.review !== 'boolean' || typeof row.execSource !== 'boolean')) service.preview = undefined
+    try {
+      const cached = JSON.parse(await readFile(join(dir, 'preview.json'), 'utf8'))
+      service.previousSourceRoot = cached.sourceRoot
+      if (cached.version === previewVersion && Array.isArray(cached.rows)) service.preview = cached
+    } catch (error) { if (error.code !== 'ENOENT') service.scanError = '上次预览缓存不可用，请重新扫描' }
     return service
   }
   busy() { return !!this.store.active() }
@@ -102,7 +106,7 @@ export class MigrationService {
     if (this.scanning) throw new Error('正在扫描，请等待当前扫描完成')
     this.scanning = true
     let root
-    try { root = await directory(sourceRoot || this.preview?.sourceRoot || process.env.CODEX_HOME || join(homedir(), '.codex')) }
+    try { root = await directory(sourceRoot || this.preview?.sourceRoot || this.previousSourceRoot || process.env.CODEX_HOME || join(homedir(), '.codex')) }
     catch (error) { this.scanning = false; throw error }
     if (!root) { this.scanning = false; throw new Error('Codex 来源必须是 DSH 机器上已存在的绝对目录') }
     this.scanning = true; this.scanError = null
@@ -143,7 +147,7 @@ export class MigrationService {
           imported: !!exists, result, lazyDetail: true, frozenGroup, missingCwd, target: targetId(group.root) })
       }
       rows.sort((a, b) => b.recent.localeCompare(a.recent))
-      const preview = { ...this.progress, scannedAt: Date.now() }
+      const preview = { ...this.progress, version: previewVersion, scannedAt: Date.now() }
       await atomicJSON(join(this.store.dir, 'preview.json'), preview)
       this.preview = preview
     })().catch(error => { this.scanError = errorReason(error) }).finally(() => { this.scanning = false; this.progress = undefined })
@@ -152,7 +156,7 @@ export class MigrationService {
     const visible = this.progress ?? this.preview
     const rows = filtered(visible?.rows ?? [], query)
     const page = Math.max(0, Number(query.page) || 0), size = 20
-    return { previewId: visible?.id, sourceRoot: visible?.sourceRoot ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
+    return { previewId: visible?.id, sourceRoot: visible?.sourceRoot ?? this.previousSourceRoot ?? process.env.CODEX_HOME ?? join(homedir(), '.codex'),
       scannedAt: this.preview?.scannedAt, scanning: this.scanning, scanError: this.scanError,
       directories: [...new Set((visible?.rows ?? []).map(row => row.cwd).filter(Boolean))].sort(),
       eligible: rows.filter(row => pending.has(row.status)).map(row => ({ id: row.root, cwd: row.status === 'cwd' })),

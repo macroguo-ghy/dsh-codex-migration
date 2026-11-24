@@ -55,12 +55,20 @@ test('missing working directory blocks only that group, while other groups compl
   const source = (await readFile(path, 'utf8')).split('\n')
   const meta = JSON.parse(source[0]); meta.payload.cwd = '/not/a/real/directory/migration'
   source[0] = JSON.stringify(meta); await writeFile(path, source.join('\n'))
+  const child = await h.source('child-missing-directory', turn('child'), { parent: 'missing-directory' })
+  const childRows = (await readFile(child, 'utf8')).split('\n')
+  const childMeta = JSON.parse(childRows[0]); childMeta.payload.cwd = meta.payload.cwd
+  childRows[0] = JSON.stringify(childMeta); await writeFile(child, childRows.join('\n'))
   await h.source('good-directory', turn('valid directory'))
   const result = await h.run({ migration: {} })
   assert.equal(result.migration.preview.counts.cwd, 1)
   assert.equal(result.migration.task.results['good-directory'].status, '成功')
   assert.match(result.migration.task.results['missing-directory'].reason, /工作目录/)
   assert.equal(result.sessions.length, 1)
+  const retry = await h.run({ migration: { ids: ['missing-directory'], batchCwd: h.cwd } })
+  assert.equal(retry.migration.task.results['missing-directory'].status, '成功')
+  assert.equal(retry.sessions.length, 3)
+  assert.ok(retry.sessions.every(session => session.header.cwd === h.cwd))
 })
 
 

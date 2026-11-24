@@ -1,5 +1,5 @@
 import { rolloutMetadata, readRollout, targetId, splitTurns, digest } from './source.js'
-import { importSession, appendMetadata } from './import.js'
+import { importSession, appendMetadata, directory } from './import.js'
 import { refreshImportedSidebar } from './sidebar.js'
 
 function parentOf(meta) {
@@ -134,8 +134,9 @@ function spawnedChildren(source) {
 
 export async function importGroup(ctx, group, options) {
   const handles = new Map(), sources = new Map(), results = [], failures = []
+  let inheritedCwd
   const settings = node => ({ ...options, title: options.titles.get(node.id), keepOpen: true,
-    handle: handles.get(node.id), cwd: options.cwd ?? (node.parent ? handles.get(group.root)?.header.cwd ?? sources.get(group.root)?.meta.cwd : undefined), parentSession: node.parent ? targetId(node.parent) : undefined,
+    handle: handles.get(node.id), cwd: options.cwd ?? (node.parent ? inheritedCwd : undefined), parentSession: node.parent ? targetId(node.parent) : undefined,
     depth: node.depth, onHandle: handle => handles.set(node.id, handle) })
   try {
     for (const node of group.members) {
@@ -171,6 +172,9 @@ export async function importGroup(ctx, group, options) {
           else if (event.type === 'turn/start' && !importing) nativeAdded = true
         }
       }
+    }
+    if (!options.cwd && group.members.length > 1) {
+      inheritedCwd = await directory(handles.get(group.root)?.header.cwd ?? sources.get(group.root)?.meta.cwd)
     }
     let sourceAdded = false
     for (const node of group.members) {

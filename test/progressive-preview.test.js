@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MigrationService } from '../src/migration-service.js'
@@ -75,4 +75,29 @@ test('combined filters and bulk submission use the same scope across pages', asy
   await assert.rejects(service.submit({ previewId: 'p', ids: [], requireReady: true }), /请选择/)
   const task = await service.submit({ previewId: 'p', query })
   assert.deepEqual(task.groups.map(group => group.root), included.map(row => row.root))
+})
+
+
+test('upgrading invalidates old preflight results and rescans the selected source only once', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'migration-cache-')))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const dir = join(root, 'state'), source = join(root, 'custom-source')
+  await mkdir(dir)
+  await mkdir(join(source, 'sessions'), { recursive: true })
+  await writeFile(join(dir, 'preview.json'), JSON.stringify({ id: 'old', sourceRoot: source,
+    rows: [{ root: 'old', sideConversation: false, automation: false, review: false, execSource: false, status: 'blocked' }] }))
+  const service = await MigrationService.open({}, dir)
+  let id
+  try {
+    assert.equal(service.view().previewId, undefined)
+    assert.equal(service.view().sourceRoot, source)
+    await assert.rejects(service.submit({ previewId: 'old' }), /预览已更新/)
+    await service.scan()
+    await service.scanPromise
+    id = service.view().previewId
+    assert.ok(id)
+    assert.equal(service.view().sourceRoot, source)
+  } finally { await service.close() }
+  const restarted = await MigrationService.open({}, dir)
+  try { assert.equal(restarted.view().previewId, id) } finally { await restarted.close() }
 })

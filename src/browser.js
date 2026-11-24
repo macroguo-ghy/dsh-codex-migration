@@ -6,5 +6,5 @@ export const inject = ['remote']
 export async function apply(ctx) {
   await ctx.remote.$mount(contribution)
   ctx.plugin({ inject: conversationInject, apply: conversation })
-  ctx.plugin({ inject: ['slots', 'locale', 'remote', 'remote.codexMigration', 'layout', 'uiWorkspace'], apply: applyMigrationUI })
+  ctx.plugin({ inject: ['slots', 'locale', 'remote', 'remote.codexMigration', 'layout', 'uiWorkspace', 'workspaces'], apply: applyMigrationUI })
 }
