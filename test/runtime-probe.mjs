@@ -43,6 +43,11 @@ export function apply(ctx) {
           await writer.flush()
         } finally { await writer.close() }
       }
+      if (input.afterWithdrawal) {
+        output.beforePid = input.afterWithdrawal
+        output.afterPid = process.pid
+        output.receipt = JSON.parse(await readFile(process.env.DSH_HOME + '/codex-cleanup-status.json', 'utf8'))
+      }
       if (input.migration) {
         const migration = ctx.get('codexMigration')
         const request = async payload => {
@@ -107,6 +112,14 @@ export function apply(ctx) {
           output.migration.task = await wait(async () => { const task = await request({ op: 'task', id: next.id }); return task.state === 'completed' && task })
         }
         if (input.migration.withdrawPreview) output.migration.withdrawal = await request({ op: 'cleanup-preview', taskId: output.migration.task.id })
+        if (input.migration.withdrawRoot) {
+          const preview = await request({ op: 'cleanup-preview', root: input.migration.withdrawRoot })
+          const selection = preview.rows.map(({ root, scope }) => ({ root, scope }))
+          await writeFile(process.env.MIGRATION_PROBE_INPUT, JSON.stringify({ afterWithdrawal: process.pid }))
+          await request({ op: 'cleanup-execute', selection, root: input.migration.withdrawRoot, requestId: 'withdraw-probe' })
+          // The plugin shuts down this host. Only the relaunched probe writes the final output.
+          await new Promise(() => {})
+        }
         output.migration.agents = ctx.agents.list().map(agent => agent.session.header.id)
       }
       if (input.command) {

@@ -105,3 +105,18 @@ test('changing a reviewed child prefix blocks its entire family before any desti
   assert.equal(result.migration.preview.rows.find(row => row.root === 'frozen-family').members[1].cutoff.turns, 1)
   assert.ok(result.migration.preview.rows.find(row => row.root === 'frozen-family').members[1].cutoff.line > 1)
 })
+
+test('standard web launch withdraws offline and resumes with the same process identity', {
+  skip: !process.execve || !['darwin', 'linux'].includes(process.platform),
+}, async t => {
+  const h = await harness(t)
+  await h.source('remove', turn('withdraw this synthetic conversation'))
+  await h.source('keep', turn('keep this synthetic conversation'))
+  const result = await h.run({ migration: { withdrawRoot: 'remove' }, timeout: 40000 })
+  assert.ok(result.beforePid > 0)
+  assert.equal(result.afterPid, result.beforePid)
+  assert.equal(result.receipt.requestId, 'withdraw-probe')
+  assert.match(result.receipt.text, /已撤回 1 个对话/)
+  assert.equal(result.sessions.length, 1)
+  assert.ok(result.sessions[0].events.some(event => event.type === 'codex-migration/begin' && event.data.source === 'keep'))
+})

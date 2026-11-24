@@ -1,14 +1,17 @@
-import { execFile, spawn } from 'node:child_process'
-import { once } from 'node:events'
-import { access, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
+import { access, readFile, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { rmSync, writeFileSync } from 'node:fs'
 import { describe, inventory, selectVerified, taskScope } from './withdraw.js'
 import { atomicJSON } from './tasks.js'
 
-const exec = promisify(execFile)
+function supportsWebRestart() {
+  const args = process.argv.slice(2)
+  return typeof process.execve === 'function' && ['linux', 'darwin'].includes(process.platform) &&
+    (args[0] === 'web' || (args[0] === '--profile' && args[1] === 'web') || args[0] === '--profile=web')
+}
 const home = resolve(process.env.DSH_HOME ?? join(homedir(), '.dsh'))
 const report = join(home, 'codex-cleanup-status.json')
 let pending = false
@@ -28,7 +31,7 @@ export async function previewCleanup(service, input) {
       ? '该任务追加过历史，永久删除包含任务之前的内容。'
       : writes.length && writes.every(member => member.reason?.startsWith('首次导入')) ? '该任务有首次导入记录。' : '该任务有已写入的会话记录。'
   }
-  return { rows, skipped: skipped.length, previous: previous?.text, previousId: previous?.requestId }
+  return { rows, canRestart: supportsWebRestart(), skipped: skipped.length, previous: previous?.text, previousId: previous?.requestId }
 }
 
 export async function cleanupCommand(invocation) {
@@ -46,30 +49,40 @@ export async function executeCleanup(ctx, serviceStore, input, importing) {
   if (pending || importing()) throw new Error('正在导入或撤回，请稍后再试。')
   pending = true
   try {
-    const service = 'gui/' + process.getuid?.() + '/org.deepseek.dsh-web'
-    const launchers = join(homedir(), '.local', 'bin')
-    const start = join(launchers, 'dsh-start')
-    const stop = join(launchers, 'dsh-stop')
-    if (process.platform !== 'darwin' || process.argv.length !== 3 || process.argv[2] !== 'web') {
-      throw new Error('当前启动方式不支持对话框执行清理，请使用默认 dsh-start 启动方式。')
-    }
-    await Promise.all([access(start), access(stop)])
-    const { stdout } = await exec('/bin/launchctl', ['print', service])
-    if (Number(stdout.match(/^\s*pid = (\d+)/m)?.[1]) !== process.pid) {
-      throw new Error('当前进程不是 dsh-start 管理的 Web 服务，请使用默认 dsh-start 启动方式。')
-    }
-    if (ctx.get('agents')?.list().some(agent => agent.status !== 'idle') || importing()) {
+    if (!supportsWebRestart()) throw new Error('实验性撤回需要支持进程替换的 Node.js 和以 dsh web 或 dsh --profile web 启动的 macOS/Linux 宿主。')
+    const worker = fileURLToPath(new URL('./cleanup-worker.js', import.meta.url))
+    await access(worker)
+    const busy = () => ctx.get('agents')?.list().some(agent => agent.status !== 'idle') || importing()
+    if (busy()) {
       throw new Error('DSH 仍有活跃会话，请等它们空闲后再执行。')
     }
-    await atomicJSON(join(home, 'codex-delete-request.json'), {
+    if (input.requestId !== undefined && typeof input.requestId !== 'string') throw new Error('无效撤回请求 ID。')
+    const path = join(home, 'codex-delete-' + randomUUID() + '.json')
+    await atomicJSON(path, {
       requestId: input.requestId, selection: input.selection.map(({ root, scope }) => ({ root, scope })), confirmed: input.confirmed === true, taskId: input.taskId,
     })
-    await writeFile(report, JSON.stringify({ requestId: input.requestId, text: '已提交永久删除，正在等待 Web 重启。' }), { mode: 0o600 })
-    const worker = spawn(process.execPath, [fileURLToPath(new URL('./cleanup-worker.js', import.meta.url)),
-      String(process.pid), home, service], { detached: true, stdio: 'ignore', env: process.env })
-    worker.once('exit', () => { pending = false })
-    await once(worker, 'spawn')
-    worker.unref()
+    try {
+      await atomicJSON(report, { requestId: input.requestId, text: '已提交永久删除，正在等待 Web 重启。' })
+    } catch (error) { await rm(path, { force: true }); throw error }
+    // Let the gateway deliver the response before asking DSH to drain and exit.
+    setTimeout(() => {
+      if (busy()) {
+        pending = false
+        rmSync(path, { force: true })
+        writeFileSync(report, JSON.stringify({ requestId: input.requestId, text: '撤回已取消。DSH 开始了新的任务，请等它结束后重试。' }), { mode: 0o600 })
+        return
+      }
+      process.once('exit', code => {
+        try {
+          if (code !== 0) throw new Error('Web 未正常关闭，已取消撤回。')
+          process.execve(process.execPath, [process.execPath, worker, home, path, ...process.execArgv, ...process.argv.slice(1)], process.env)
+        } catch (error) {
+          rmSync(path, { force: true })
+          writeFileSync(report, JSON.stringify({ requestId: input.requestId, text: '撤回未执行。' + error.message + ' 请重新运行 dsh web。' }), { mode: 0o600 })
+        }
+      })
+      process.kill(process.pid, 'SIGTERM')
+    }, 1200)
     return { submitted: true }
   } catch (error) { pending = false; throw error }
 }

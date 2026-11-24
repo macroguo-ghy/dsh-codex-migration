@@ -251,6 +251,8 @@ function CleanupPanel({ actions, pending, active, scope }) {
   return h('section', { role: 'tabpanel', id: 'cm-cleanup', 'aria-labelledby': 'cm-cleanup-tab' },
     h('h2', null, scope.taskId ? t('撤回任务相关对话', 'Withdraw conversations from task') : scope.root ? t('撤回此对话', 'Withdraw this conversation') : t('撤回已导入对话', 'Withdraw imported conversations')),
     h('p', null, t('将永久删除所选对话的完整历史。即使任务只追加了几轮，更早导入的历史也将一并删除。', 'Withdrawal permanently deletes the entire selected DSH history, including history imported before this task.')),
+    h('p', { className: 'cm-muted' }, t('实验性功能：确认后 DSH Web 将短暂关闭，撤回完成后按原启动参数重启。', 'Experimental: DSH Web briefly stops and restarts with its original arguments after withdrawal.')),
+    preview?.canRestart === false && h('p', { role: 'alert' }, t('当前宿主无法自动重启。请在支持进程替换的 macOS 或 Linux 环境中用 dsh web 启动。', 'Automatic restart is unavailable. Start dsh web on macOS or Linux with a Node runtime that supports process replacement.')),
     button(t('刷新预览', 'Refresh preview'), inspect, pending),
     result && h('p', { role: 'status' }, result),
     submitted && h('p', { role: 'status' }, t('已提交删除。Web 重启后可重新预览结果。', 'Deletion submitted. Check the result after Web restarts.')),
@@ -271,14 +273,14 @@ function CleanupPanel({ actions, pending, active, scope }) {
       continued > 0 && h('div', { className: 'cm-warning', role: 'status' }, t('选中的 ', 'Of the ') + groups.length + t(' 个对话中，有 ', ' selected conversations, ') + continued + t(' 个已在 DSH 续聊。撤回后，新增的续聊内容将永久丢失。', ' have new DSH turns. Withdrawing permanently deletes those turns.')),
       continued > 0 && h('label', null, h('input', { type: 'checkbox', checked: confirmed, onChange: e => setConfirmed(e.target.checked) }),
         t('我确认永久删除这些对话及其 DSH 续聊', 'I confirm permanent deletion of these conversations and their DSH continuations')),
-      button(t('确认撤回', 'Confirm withdrawal'), execute, !groups.length || pending || !!active || (continued && !confirmed)),
+      button(t('确认撤回', 'Confirm withdrawal'), execute, !preview.canRestart || !groups.length || pending || !!active || (continued && !confirmed)),
       active && h('p', null, t('请等待迁移任务结束后再删除。', 'Wait for the migration task to finish before deleting.'))))
 }
 
 function withdrawalResult(text) {
   // Older receipts counted stored sessions and cannot supply a conversation count.
   if (/^已永久删除 \d+ 条会话。/.test(text)) {
-    if (text.includes('Web 重启失败')) return t('Web 重启失败，请手动运行 dsh-start，并重新预览撤回结果。', 'Web restart failed. Run dsh-start and refresh the withdrawal preview.')
+    if (text.includes('Web 重启失败')) return t('Web 重启失败，请手动运行 dsh web，并重新预览撤回结果。', 'Web restart failed. Run dsh web and refresh the withdrawal preview.')
     return text.includes('失败') ? t('部分对话未完整撤回，请重新预览。', 'Some conversations were not fully withdrawn. Refresh the preview.') : t('已完成撤回。', 'Withdrawal completed.')
   }
   return text
@@ -346,7 +348,7 @@ function MigrationPage({ actions }) {
       active && h(TaskCard, { task: active, actions, onRetry: retry, onWithdraw: withdraw }),
       h(SegmentedTabs, { label: t('Codex 迁移视图', 'Codex migration views'), value: tab, onChange: value => { if (value === 'cleanup') setWithdrawScope({}); setTab(value) }, items: [
         { value: 'sessions', label: t('对话列表', 'Conversations'), id: 'cm-sessions-tab', panelId: 'cm-sessions' },
-        { value: 'cleanup', label: t('撤回导入', 'Withdraw import'), id: 'cm-cleanup-tab', panelId: 'cm-cleanup' },
+        { value: 'cleanup', label: t('撤回导入（实验性）', 'Withdraw import (experimental)'), id: 'cm-cleanup-tab', panelId: 'cm-cleanup' },
         { value: 'tasks', label: t('任务记录', 'Task history'), id: 'cm-tasks-tab', panelId: 'cm-tasks' },
       ] }),
       tab === 'cleanup' ? h(CleanupPanel, { key: withdrawScope.root || withdrawScope.taskId || 'all', actions, pending, active, scope: withdrawScope }) : tab === 'tasks' ? h('section', { role: 'tabpanel', id: 'cm-tasks', 'aria-labelledby': 'cm-tasks-tab' },
