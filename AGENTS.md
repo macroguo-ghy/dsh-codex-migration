@@ -20,6 +20,13 @@
 
 将生成的文件名传给 `dsh plugin --profile web add ./<文件名>.tgz`。首次启动 Web 使用 `dsh web`；本机若由 `dsh-start` 管理，更新插件后使用配套的 `dsh-restart`，再打开「Codex 迁移」验证。
 
+## 迁移与恢复约定
+
+- 重试时重新发现源文件、重复副本和会话归属，只对原任务失败或未完成的组加载历史、检查目标状态。重试预览独立于完整预览；返回全部对话时复用已有预览。相关回归见 `test/progressive-preview.test.js`。
+- 仅在相同的冻结历史范围内复用轮次和哈希。若下一轮的开始事件标记上一轮中断，保留这个边界，排除下一轮正文。修改解析时用 `test/frozen-source.test.js` 核对旧任务恢复和源历史被改写的情况。
+- 阶段提示保存在内存，成员检查点和组结果增量写入 SQLite，任务创建和结束时保存完整 JSON。修改持久化时用 `test/tasks.test.js` 验证进程被终止后能从检查点恢复。
+- 性能对照使用同一份固定源数据和独立 DSH 目标目录，分别计时预览和导入。核对目标会话数量、归属、轮数和哈希后，再比较耗时、写入量和峰值内存。
+
 ## 前端与交互约定
 
 通过宿主 slot 渲染页面。复用插件内的 `ui-controls.js` 和 `ui-locale.js`，颜色使用 `--dsw-alias-*`，列表排版参照 DSH 插件管理器。外部插件避免直接加载 Harness Client 控件包。详见 [DSH 外部插件 UI 规范](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.1/packages/preset/agent-preset/skills/cordis-plugin-development/references/practices.md#L31-L36)。
