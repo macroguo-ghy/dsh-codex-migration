@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { createZstdDecompress } from 'node:zlib'
-import { buffer } from 'node:stream/consumers'
 import { createInterface } from 'node:readline'
 import { readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -75,27 +74,50 @@ export async function rolloutId(path) {
 }
 
 export async function readRollout(path, throughLine, includeNextRecord = false) {
-  const raw = path.endsWith('.zst') ? (await buffer(rolloutStream(path))).toString('utf8') : await readFile(path, 'utf8')
-  const allLines = raw.split('\n')
-  let end = throughLine
-  if (includeNextRecord && end != null) {
-    while (end < allLines.length && !allLines[end].trim()) end++
-    end++
-  }
-  const lines = allLines.slice(0, end)
   const rows = []
-  for (const [index, line] of lines.entries()) {
-    if (!line.trim()) continue
-    try {
-      const row = JSON.parse(line)
-      if (typeof row?.type !== 'string' || !row.payload || typeof row.payload !== 'object') throw new Error()
-      rows.push({ row, line, lineNumber: index + 1 })
-    } catch {
-      if (index === lines.length - 1 && !raw.endsWith('\n') && !path.includes('/archived_sessions/')) {
-        throw new Error('源文件末行不完整，等待 Codex 写完后重试')
+  let lineNumber = 0
+  function record(line, terminated) {
+    lineNumber++
+    if (line.trim()) {
+      try {
+        const row = JSON.parse(line)
+        if (typeof row?.type !== 'string' || !row.payload || typeof row.payload !== 'object') throw new Error()
+        rows.push({ row, line, lineNumber })
+      } catch {
+        if (!terminated && !path.includes('/archived_sessions/')) throw new Error('源文件末行不完整，等待 Codex 写完后重试')
+        throw new Error('源文件第 ' + lineNumber + ' 行不是有效记录')
       }
-      throw new Error('源文件第 ' + (index + 1) + ' 行不是有效记录')
+      if (includeNextRecord && lineNumber > throughLine) return true
     }
+    return !includeNextRecord && lineNumber >= throughLine
+  }
+
+  // Split on LF bytes before decoding. This preserves CR and exact line text
+  // for frozen hashes, including UTF-8 characters spanning decoder chunks.
+  const stream = path.endsWith('.zst') ? rolloutStream(path) : undefined
+  const chunks = stream ?? [await readFile(path)]
+  const fragments = []
+  function decodeLine(tail) {
+    if (!fragments.length) return tail.toString('utf8')
+    fragments.push(tail)
+    const line = Buffer.concat(fragments).toString('utf8')
+    fragments.length = 0
+    return line
+  }
+  try {
+    if (throughLine !== 0 || includeNextRecord) {
+      reading: for await (const chunk of chunks) {
+        let start = 0
+        for (let end = chunk.indexOf(10); end !== -1; end = chunk.indexOf(10, start)) {
+          if (record(decodeLine(chunk.subarray(start, end)), true)) break reading
+          start = end + 1
+        }
+        if (start < chunk.length) fragments.push(chunk.subarray(start))
+      }
+      if (fragments.length) record(decodeLine(Buffer.alloc(0)), false)
+    }
+  } finally {
+    stream?.destroy()
   }
   const meta = rows.find(({ row }) => row.type === 'session_meta')?.row.payload
   if (typeof meta?.id !== 'string' || !meta.id) throw new Error('缺少源会话 ID')

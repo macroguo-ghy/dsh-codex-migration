@@ -13,7 +13,7 @@
    npm pack
    ```
 
-2. 打开 DSH 的「插件 → 添加插件」，选择刚生成的 `dsh-codex-migration-<版本>.tgz` 并启用。使用命令行时，可运行 `dsh plugin --profile web add ./dsh-codex-migration-0.4.1-beta.5.tgz`，文件名以本次打包输出为准。
+2. 打开 DSH 的「插件 → 添加插件」，选择刚生成的 `dsh-codex-migration-<版本>.tgz` 并启用。使用命令行时，可运行 `dsh plugin --profile web add ./dsh-codex-migration-0.4.1-beta.6.tgz`，文件名以本次打包输出为准。
 3. 打开 DSH Web，在侧边栏找到「Codex 迁移」。首次启动可运行 `dsh web`。已运行的实例按宿主提示重新加载插件或重启；平时使用 `dsh-start` 管理的实例可用 `dsh-restart`。
 
 ## 第一次导入一个对话
