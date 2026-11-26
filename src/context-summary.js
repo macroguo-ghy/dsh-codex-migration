@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
-import { filteredHistoryMessage, isFilteredHistory, quoteHistory } from './filtered-history.js'
+import { filteredHistoryMessage, isFilteredHistory, quotedSources, quoteHistory } from './filtered-history.js'
 import { currentChoice, writeChoice } from './context-workflow.js'
 
 const BLOCK = 'plugin:codex-migration/summary-block'
@@ -78,7 +78,7 @@ function segmentsFor(ctx, state, includeHumans) {
   const history = nodes.slice(0, tail).map(node => {
     if (!isFilteredHistory(node.event)) return { node, parts: [node] }
     const parts = []
-    for (const seq of node.event.sourceEventSeqs) {
+    for (const seq of quotedSources(state.session, node.event)) {
       const message = filteredHistoryMessage(state.session, seq)
       if (message?.content.length) {
         parts.push({ seq, message, event: state.session.eventAt(seq) })

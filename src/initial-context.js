@@ -1,6 +1,6 @@
 import { appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
-import { quoteHistory } from './filtered-history.js'
+import { isFilteredHistory, quotedSources, quoteHistory } from './filtered-history.js'
 import { installContextWorkflow, currentChoice, writeChoice } from './context-workflow.js'
 
 // This local, model-free retry rebuilds a LOOP request from the changed native
@@ -44,7 +44,7 @@ function candidates(session, checkpoint, measurement) {
     else if (event.type === 'codex-migration/checkpoint') inBatch = false
     else if (inBatch && ['assistant/message', 'tool/result'].includes(event.type)) imported.add(event.data.message.id)
   }
-  const traces = [], results = new Map()
+  const traces = [], results = new Map(), reasoning = []
   for (const seq of session.surface.nodes) {
     const event = session.eventAt(seq)
     if (!imported.has(event.data.message?.id)) continue
@@ -54,6 +54,7 @@ function candidates(session, checkpoint, measurement) {
         resultSeq: seq, turn: event.data.turn, time: event.time, tokens: prices.get(seq)?.tokens ?? 0 })
     } else if (event.type === 'assistant/message') {
       const content = session.deriveEventMessage(event)?.content ?? []
+      if (content.some(block => block.type === 'reasoning')) reasoning.push(seq)
       for (const block of content) if (block.type === 'tool-call') {
         traces.push({ callId: block.id, name: block.name, assistantSeq: seq, resultSeq: undefined,
           turn: event.data.turn, time: event.time, tokens: prices.get(seq)?.tokens ?? 0 })
@@ -64,12 +65,12 @@ function candidates(session, checkpoint, measurement) {
     const key = trace.turn + ':' + trace.callId, result = results.get(key)
     if (result) { trace.resultSeq = result.resultSeq; trace.tokens += result.tokens; results.delete(key) }
   }
-  return [...traces, ...results.values()]
+  return { omitted: [...traces, ...results.values()], reasoning }
 }
 
 function omissionNotice(id) {
   return { id, role: 'user', source: { kind: 'codex-imported-context', form: 'notice' }, content: [{ type: 'text',
-    text: '[Codex 迁移续聊上下文] 已省略全部旧工具调用与结果，未生成摘要。完整记录可在会话历史中查看。'
+    text: '[Codex 迁移续聊上下文] 已省略导入的历史推理、旧工具调用与结果，未生成摘要。完整记录可在会话历史中查看。'
       + '仅使用本轮提供的工具及参数；需要工具结果时请重新核实。' }] }
 }
 
@@ -83,13 +84,13 @@ function prepare(ctx, state, turn, step, summarizing) {
   const { session, checkpoint, pending } = state
   const meter = ctx.tokenMeter
   const measurement = meter.measure(session)
-  const omitted = candidates(session, checkpoint, measurement)
-  if (!omitted.length) {
+  const { omitted, reasoning } = candidates(session, checkpoint, measurement)
+  if (!omitted.length && !reasoning.length) {
     if (summarizing) return
     throw tooLarge(Math.ceil(measurement.totalTokens * FACTOR), pending.budget)
   }
   const notice = omissionNotice('codex-omitted-tools-' + session.seq)
-  const plan = { ...pending, checkpoint, preparationId: session.seq, omitted, notice,
+  const plan = { ...pending, checkpoint, preparationId: session.seq, omitted, reasoning, notice,
     allImportedTools: true, retainedPairs: 0 }
   appendPluginRecord(session, BEGIN, plan)
   finishPreparation(ctx, state, plan, turn, step)
@@ -103,6 +104,7 @@ function finishPreparation(ctx, state, plan, turn, step) {
   const meter = ctx.tokenMeter
   const { omitted, notice } = plan
   const targets = new Set(omitted.flatMap(pair => [pair.assistantSeq, pair.resultSeq]).filter(Number.isInteger))
+  for (const seq of plan.reasoning ?? []) targets.add(seq)
   // Only compact a contiguous run of migration-owned nodes. Native messages,
   // the system head, and earlier summary replacements remain independent.
   const imported = new Set()
@@ -150,10 +152,31 @@ function finishPreparation(ctx, state, plan, turn, step) {
   const { notice: _notice, ...receipt } = plan
   appendPluginRecord(session, 'plugin:codex-migration/request-budget', {
     ...receipt, estimated, factor: FACTOR, phase: 'initial',
-    timeRange: { start: omitted[0].time, end: omitted.at(-1).time },
+    ...(omitted.length && { timeRange: { start: omitted[0].time, end: omitted.at(-1).time } }),
     ...(session.header.origin === 'subagent' ? { address: { kind: 'subagent', parentSessionId: session.header.parentSession,
       childSessionId: session.id, mode: 'continuable' } } : {}),
   })
+}
+
+// An older preparation may have quoted reasoning as ordinary user text.
+// Rebuild only recorded migration ranges, using their exact source seqs.
+function repairPreparedHistory(session, turn, step) {
+  for (const seq of [...session.surface.nodes]) {
+    const event = session.eventAt(seq)
+    const original = isFilteredHistory(event) ? quotedSources(session, event) : [seq]
+    if (!original?.some(index => {
+      const message = session.eventAt(index).data.message
+      return message?.source?.provider === 'codex' && message.id?.startsWith('codex-message-')
+        && message.content.some(block => block.type === 'reasoning')
+    })) continue
+    const content = quoteHistory(session, original)
+    if (isFilteredHistory(event) && JSON.stringify(content) === JSON.stringify(event.data.content)) continue
+    const replacement = { surfaceOp: { op: /** @type {const} */ ('replace'), startSeq: seq, endSeq: seq }, sourceEventSeqs: isFilteredHistory(event) ? [...original, seq] : original }
+    const source = { kind: /** @type {const} */ ('codex-imported-context'), form: /** @type {const} */ ('notice') }
+    if (content.length) session.append('user/message', { id: 'codex-filtered-history-upgrade-' + seq, role: 'user', source, content }, replacement)
+    else session.append('developer/message', { turn, step, message: { id: 'codex-omitted-node-upgrade-' + seq,
+      role: 'developer', source, content: [] } }, replacement)
+  }
 }
 
 export function installInitialContext(ctx) {
@@ -211,6 +234,11 @@ export function installInitialContext(ctx) {
       finishPreparation(ctx, state, state.recovery, turn, step)
       state.recovery = undefined
     }
+    if (state?.checkpoint !== undefined && !state.checkedLegacy) {
+      const receipt = state.session.snapshotEvents().findLast(event => event.seq > state.checkpoint && event.type === 'plugin:codex-migration/request-budget')
+      if ((state.ready || receipt) && !receipt?.data.reasoning) repairPreparedHistory(state.session, turn, step)
+      state.checkedLegacy = true
+    }
     if (state && !state.ready) {
       const { recoverSummary } = await import('./context-summary.js')
       await recoverSummary(ctx, state)
@@ -231,7 +259,8 @@ export function installInitialContext(ctx) {
     const envelope = limits(ctx, state, request)
     const measurement = ctx.tokenMeter.measure(state.session)
     const estimated = Math.ceil(measurement.totalTokens * FACTOR)
-    if (candidates(state.session, state.checkpoint, measurement).length || estimated > envelope.budget || currentChoice(state.session)?.status === 'summarizing') {
+    const { omitted, reasoning } = candidates(state.session, state.checkpoint, measurement)
+    if (omitted.length || reasoning.length || estimated > envelope.budget || currentChoice(state.session)?.status === 'summarizing') {
       state.pending = envelope
       yield { type: 'finish', reason: { kind: 'error', failure: { code: PREPARE, message: '正在准备迁移历史的续聊上下文' } } }
       return

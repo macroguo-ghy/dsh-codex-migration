@@ -161,10 +161,10 @@ test('packaged command imports and continues native DSH 0.2.2-rc.1 sessions', { 
   const continued = await run({ resume: first.header.id })
   const request = JSON.stringify(continued.requests)
   for (const text of ['original user text', 'original assistant text',
-    'original reasoning summary', 'historical AGENTS.md content', 'automatically loaded skill', 'second user', 'native continuation prompt']) {
+    'historical AGENTS.md content', 'automatically loaded skill', 'second user', 'native continuation prompt']) {
     assert.ok(request.includes(text), 'missing from continuation request: ' + text)
   }
-  assert.doesNotMatch(request, /original tool result/)
+  assert.doesNotMatch(request, /original tool result|original reasoning summary/)
   assert.match(request, /Codex 历史工具说明/)
   assert.ok(JSON.stringify(continued.sessions).includes('native continuation answer'))
   const dshOnly = await run({ command: '/import-codex main --execute' })

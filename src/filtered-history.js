@@ -4,13 +4,19 @@ export function filteredHistoryMessage(session, seq) {
   const message = session.deriveEventMessage(session.eventAt(seq))
   if (!message || message.role === 'tool') return null
   if (message.role !== 'assistant') return message
-  const content = message.content.filter(block => block.type !== 'tool-call')
+  const content = message.content.filter(block => block.type !== 'tool-call' && block.type !== 'reasoning')
   return content.length ? { ...message, content } : null
 }
 
 export function isFilteredHistory(event) {
   return event.type === 'user/message' && event.data.source?.kind === 'codex-imported-context'
     && event.data.id.startsWith('codex-filtered-history-') && event.surfaceOp?.op === 'replace'
+}
+
+// Repaired quotations must cite the previous surface node as well as its
+// originals. The intermediate user-role quote is never a historical speaker.
+export function quotedSources(session, event) {
+  return event.sourceEventSeqs.filter(seq => !isFilteredHistory(session.eventAt(seq)))
 }
 
 export function quoteHistory(session, seqs) {
@@ -24,7 +30,7 @@ export function quoteHistory(session, seqs) {
     if (!message?.content.length) continue
     lines.push('[Codex 历史原文 · ' + message.role + ' · ' + message.source.kind + ' · seq ' + seq + ']')
     for (const block of message.content) {
-      if (block.type === 'text' || block.type === 'reasoning') lines.push(block.text)
+      if (block.type === 'text') lines.push(block.text)
       else { flush(); content.push(block) }
     }
   }

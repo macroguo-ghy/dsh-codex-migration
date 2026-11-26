@@ -30,13 +30,13 @@ test('standard native continuation preserves imported evidence and uses new tool
   assert.equal(replay.requests.length, 1, JSON.stringify(replay.turnErrors))
   const wire = JSON.stringify(replay.requests[0])
   assert.match(wire, /legacy mixed prose/)
-  assert.match(wire, /legacy mixed reasoning/)
+  assert.doesNotMatch(wire, /legacy mixed reasoning/)
   assert.doesNotMatch(wire, /old evidence/)
   assert.ok(!replay.requests[0].some(m => m.role === 'assistant' && m.content.some(b => b.type === 'tool-call' && b.id === 'old')))
 
 })
 
-test('initial continuation omits old tool pairs, retains prose and reasoning, and survives cold plugin removal', { timeout: 60_000 }, async t => {
+test('initial continuation omits old tool pairs, retains prose without historical reasoning, and survives cold plugin removal', { timeout: 60_000 }, async t => {
   const h = await harness(t)
   const rows = turn('exact human prompt')
   rows.splice(2, 0,
@@ -58,7 +58,7 @@ test('initial continuation omits old tool pairs, retains prose and reasoning, an
     const wire = JSON.stringify(request)
     assert.match(wire, /exact human prompt/)
     assert.match(wire, /answer: exact human prompt/)
-    assert.match(wire, /exact readable reasoning/)
+    assert.doesNotMatch(wire, /exact readable reasoning/)
     assert.doesNotMatch(wire, /retained recent evidence/)
     assert.match(wire, /已省略.*工具/)
     assert.equal(/old argument|old result/.test(wire), false)
@@ -74,7 +74,7 @@ test('initial continuation omits old tool pairs, retains prose and reasoning, an
     pageRequests: originalSeqs.map(seq => ({ address: { kind: 'session', sessionId: id }, throughSeq: seq, beforeSeq: seq + 1, maxMessages: 1 })) })
   assert.equal(reopened.requests.length, 1)
   assert.doesNotMatch(JSON.stringify(reopened.requests), /old argument|old result/)
-  assert.match(JSON.stringify(reopened.requests), /exact readable reasoning/)
+  assert.doesNotMatch(JSON.stringify(reopened.requests), /exact readable reasoning/)
   for (const [index, page] of reopened.originalPages.entries()) {
     assert.ok(page.records.some(record => record.event.seq === originalSeqs[index]))
   }
@@ -87,7 +87,34 @@ test('initial continuation omits old tool pairs, retains prose and reasoning, an
   assert.equal(repaired.requests.length, 1)
   assert.equal(repaired.summaries, 0)
   assert.equal(/old argument|old result/.test(JSON.stringify(repaired.requests)), false)
-  assert.match(JSON.stringify(repaired.requests), /exact readable reasoning/)
+  assert.doesNotMatch(JSON.stringify(repaired.requests), /exact readable reasoning/)
+})
+
+test('reasoning-only preparation excludes old reasoning without tools and keeps the source transcript', { timeout: 45_000 }, async t => {
+  const h = await harness(t)
+  const rows = turn('plain answer')
+  rows.splice(2, 0, row('response_item', { type: 'reasoning', summary: [{ text: 'hidden historical token' }] }))
+  await h.source('no-tool-reasoning', rows)
+  await h.run({ command: '/import-codex no-tool-reasoning --execute' })
+  const resumed = await h.run({ resume: targetId('no-tool-reasoning') })
+  assert.equal(resumed.requests.length, 1, JSON.stringify(resumed.turnErrors))
+  assert.doesNotMatch(JSON.stringify(resumed.requests), /hidden historical token/)
+  assert.match(JSON.stringify(resumed.requests), /answer: plain answer/)
+  const events = resumed.sessions[0].events
+  assert.ok(events.some(event => event.type === 'assistant/message' && event.data.message.content.some(block => block.text === 'hidden historical token')))
+  const receipt = events.find(event => event.type === 'plugin:codex-migration/request-budget')
+  assert.deepEqual(receipt.data.omitted, [])
+
+  // Older preparations quoted readable reasoning in a user-role replacement.
+  const quote = events.find(event => event.type === 'user/message' && event.data.id.startsWith('codex-filtered-history-'))
+  quote.data.content.push({ type: 'text', text: 'hidden historical token' })
+  delete receipt.data.reasoning
+  const old = await harness(t)
+  await old.run({ seedPartial: { header: resumed.sessions[0].header, events } })
+  const upgraded = await old.run({ resume: targetId('no-tool-reasoning') })
+  assert.equal(upgraded.requests.length, 1, JSON.stringify(upgraded.turnErrors))
+  assert.doesNotMatch(JSON.stringify(upgraded.requests), /hidden historical token/)
+  assert.match(JSON.stringify(upgraded.requests), /answer: plain answer/)
 })
 
 test('protected prose above the native threshold is blocked without summaries and a larger model recovers live and cold', { timeout: 65_000 }, async t => {
