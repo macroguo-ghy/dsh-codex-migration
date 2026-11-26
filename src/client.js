@@ -65,39 +65,40 @@ const resumeDefinition = {
   start: () => ({}),
 }
 
-const reasoningKind = 'codex-migration-reasoning-summary'
-const reasoningBase = definition(reasoningKind, 'assistant/message')
-function reasoningState(event, previous) {
-  const texts = event.data.message.content.filter(block => block.type === 'reasoning' && block.text?.trim()).map(block => block.text)
-  return { lastSeq: event.seq, items: [...(previous?.items ?? []), ...(texts.length ? [{ seq: event.seq, texts }] : [])] }
-}
-export const reasoningDefinition = {
-  ...reasoningBase,
+// Older imports can contain several settled assistant messages in a single
+// step. DSH displays the last one natively. When a later message supersedes
+// an earlier one, give the earlier blocks their own native assistant node.
+const priorAssistantKind = 'codex-migration-prior-assistant'
+const priorAssistantDefinition = {
+  ...definition(priorAssistantKind, 'assistant/message'),
   match(event) {
-    const data = event.data, message = data?.message
-    return event.type === 'assistant/message' && message?.source?.provider === 'codex' && message.id?.startsWith('codex-message-')
-      ? { id: data.turn + ':' + data.step, role: 'start' } : null
+    const message = event.data?.message
+    return event.type === 'assistant/message' && event.surfaceOp === 'append'
+      && message?.source?.provider === 'codex' && message.id?.startsWith('codex-message-')
+      ? { id: String(event.seq), role: 'start' } : null
   },
-  start: (_context, match) => reasoningState(match.event),
-  update: (context, match) => reasoningState(match.event, context.state),
+  start(_context, match, reader) {
+    const prior = reader.previous(priorAssistantKind)?.matches[0]?.event
+    if (!prior || prior.data.turn !== match.event.data.turn || prior.data.step !== match.event.data.step) return null
+    return prior
+  },
   buildViewNode(context) {
-    const state = context.state
-    const hidden = state?.items.filter(item => item.seq !== state.lastSeq) ?? []
-    if (!hidden.length) return null
-    const node = reasoningBase.buildViewNode(context)
-    return node && { ...node, anchorSeq: hidden[0].seq, data: { items: hidden } }
+    const event = context.state
+    if (!event) return null
+    const { message, turn, step, usage } = event.data
+    const blocks = message.content.flatMap(block => {
+      if (block.type === 'tool-call') return [] // The native tool events own this row.
+      if (block.type === 'text' || block.type === 'reasoning') return block.text.trim() ? [{ kind: block.type, text: block.text }] : []
+      if (block.type === 'image') return [{ kind: 'image', attachment: block.attachment }]
+      return [{ kind: 'other', block }]
+    })
+    if (!blocks.length) return null
+    const { seq, time } = event
+    const finalNode = { kind: 'assistant', seq, time, turn, step, messageId: message.id, blocks, usage }
+    return { kind: 'assistant-step', key: context.key, id: context.id, target: 'chat', anchorSeq: seq,
+      location: context.start.location, visibility: 'visible',
+      data: { status: 'settled', turn, step, blocks, time, usage, finalNode } }
   },
-}
-function ReasoningCard({ node }) {
-  const [open, setOpen] = useState(false)
-  return h('div', { className: 'dsh-codex-budget' }, h('style', null, styles),
-    h(DisclosureRow, { icon: h(IconContextInjectionOutlineRegular, { size: 14 }), title: 'Codex 历史推理摘要',
-      open, onToggle: () => setOpen(!open),
-      collapsedContent: h('span', { className: 'dsh-codex-budget-summary' }, '可读摘要 ' + node.data.items.length + ' 条'),
-    }, h('div', { className: 'dsh-codex-budget-body' },
-      h('p', { className: 'dsh-codex-budget-note' }, 'Codex 保存的可读摘要，不是完整隐藏推理。此处展示不新增模型输入。'),
-      node.data.items.map(item => h('div', { key: item.seq }, h('p', { className: 'dsh-codex-budget-note' }, '原事件 ' + item.seq),
-        h('pre', { className: 'dsh-codex-context-summary' }, item.texts.join('\n')))))))
 }
 
 function ChoiceCard({ node, act, restore, inputActions, readSource }) {
@@ -199,12 +200,12 @@ function BudgetCard({ node, readOriginal }) {
       title: data.phase === 'initial' ? '首次续聊准备' : '迁移续聊', open, keepContentWhenOpen: true,
       onToggle: () => setOpen(value => !value),
       collapsedContent: h('span', { className: 'dsh-codex-budget-summary' },
-        (data.allImportedTools ? '已省略全部 ' : '已省略 ') + number(omitted.length) + unit + '工具轨迹'),
+        omitted.length || !data.reasoning?.length ? (data.allImportedTools ? '已省略全部 ' : '已省略 ') + number(omitted.length) + unit + '工具轨迹' : '已省略历史推理'),
     }, h('div', { className: 'dsh-codex-budget-body' },
       h('p', { className: 'dsh-codex-budget-note' },
         '真人输入和历史模型正文全部保留。工具记录来自旧 Codex 环境，当前工具能力以本轮提供的定义为准。'),
       data.phase === 'initial' && h('p', { className: 'dsh-codex-budget-note' },
-        '此步骤仅省略工具轨迹；摘要需要在续聊选择中明确选择。完整原记录仍可查看，首次续聊成功后使用 DSH 原生自动压缩。'),
+        '准备阶段不生成摘要。完整原记录仍可查看，首次续聊成功后使用 DSH 原生自动压缩。'),
       h('dl', { className: 'dsh-codex-budget-metrics' },
         [
           ['模型总窗口', number(data.window) + ' token'],
@@ -246,12 +247,11 @@ export function apply(ctx) {
   ctx.effect(() => ctx.uiConversation.events.register(budgetDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(reportDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(choiceDefinition))
-  ctx.effect(() => ctx.uiConversation.events.register(reasoningDefinition))
+  ctx.effect(() => ctx.uiConversation.events.register(priorAssistantDefinition))
   ctx.effect(() => ctx.uiConversation.events.register(resumeDefinition))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: resumeKind,
   }, () => h('p', { className: 'dsh-codex-budget-note' }, resumeStatus)))
-  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({ name: 'conversation.chat.node', key: reasoningKind }, ReasoningCard))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: choiceKind,
     inject: sessionId => ({

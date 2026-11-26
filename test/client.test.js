@@ -16,7 +16,7 @@ test('budget card remains outside folded analysis and loads an unloaded pair by 
     window: { __ModuleLoader__: { load(bundle) { plugin = bundle.factory(() => ({})) } } },
   })
   assert.ok(plugin.inject.includes('remote'))
-  const clientContext = { effect: fn => fn(), uiConversation: { events: { register(value) { if (value.kind === 'codex-migration-budget') definition = value; if (value.kind === 'codex-migration-reasoning-summary') reasoning = value } } },
+  const clientContext = { effect: fn => fn(), uiConversation: { events: { register(value) { if (value.kind === 'codex-migration-budget') definition = value; if (value.kind === 'codex-migration-prior-assistant') reasoning = value } } },
     slots: { inject: (_name, fn) => fn(), register(value) { if (value.key === 'codex-migration-budget') slot = value } },
     remote: { $mount: async () => {}, session: { async page(value) { request = value; requests.push(value)
       return { ok: true, value: { records: records.filter(record => record.event.seq <= value.throughSeq).slice(-value.maxMessages) } } } } },
@@ -26,14 +26,22 @@ test('budget card remains outside folded analysis and loads an unloaded pair by 
   const imported = (seq, content) => ({ seq, type: 'assistant/message', data: { turn: 1, step: 1,
     message: { id: 'codex-message-' + seq, source: { provider: 'codex' }, content } } })
   const r = imported(6, [{ type: 'reasoning', text: 'readable historical summary' }])
-  const rMatch = { event: r, location: { kind: 'turn', turn: { turn: 1 } } }
-  let state = reasoning.start({}, rMatch)
-  const context = () => ({ key: 'reasoning', id: '1:1', start: rMatch, matches: [rMatch], state })
-  assert.equal(reasoning.buildViewNode(context()), null, 'native final reasoning is not duplicated')
-  state = reasoning.update({ state }, { event: imported(8, [{ type: 'text', text: 'final body' }]) })
-  assert.equal(reasoning.buildViewNode(context()).data.items[0].texts[0], 'readable historical summary')
-  state = reasoning.update({ state }, { event: imported(10, [{ type: 'reasoning', text: 'native current reasoning' }, { type: 'text', text: 'answer' }]) })
-  assert.equal(reasoning.buildViewNode(context()).data.items.length, 1, 'only overwritten reasoning is projected')
+  r.surfaceOp = 'append'
+  assert.equal(reasoning.match(r).exclusive, undefined)
+  const follow = imported(8, [{ type: 'text', text: 'final body' }])
+  follow.surfaceOp = 'append'
+  const previous = () => ({ matches: [{ event: r }] })
+  const startMatch = { event: follow, location: { kind: 'step' } }
+  const state = reasoning.start({}, startMatch, { previous })
+  const projected = reasoning.buildViewNode({ key: 'stable', id: '8', start: startMatch, state })
+  assert.equal(projected.kind, 'assistant-step')
+  assert.equal(projected.anchorSeq, r.seq)
+  assert.equal(projected.data.blocks[0].kind, 'reasoning')
+  assert.equal(projected.data.blocks[0].text, 'readable historical summary')
+  follow.data.step = 2
+  assert.equal(reasoning.start({}, startMatch, { previous }), null)
+  r.data.message.source.provider = 'native'
+  assert.equal(reasoning.match(r), null)
   const event = { type: 'plugin:codex-migration/request-budget', seq: 99, data: { omitted: [] } }
   assert.equal(definition.match(event).role, 'start')
   const start = { event, location: { kind: 'turn', turn: { turn: 1 } } }
