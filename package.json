@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-migration",
-  "version": "0.4.1-beta.8",
+  "version": "0.4.1-beta.9",
   "license": "MIT",
   "description": "Import Codex conversations into DeepSeek Harness",
   "type": "module",
@@ -95,5 +95,9 @@
   "dependencies": {
     "@deepseek-ai/dsh-home-paths": "0.2.2-rc.1",
     "zod": "4.6.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/macroguo-ghy/dsh-codex-migration.git"
   }
 }
