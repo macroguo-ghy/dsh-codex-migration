@@ -2,19 +2,17 @@
 
 把本机 Codex 对话导入 DeepSeek Harness（DSH），在 DSH 里查看原有消息和工具记录，并接着聊。导入只读取 Codex 源文件，整个导入过程不调用模型。
 
-## 安装
+## 快速安装
 
-已验证的宿主版本为 DSH `0.2.2-rc.1`，插件需要 Node.js 22.15 或更高版本。
+在运行 DSH 的机器上执行以下命令，从 npm 安装到 Web profile：
 
-1. 在本仓库根目录运行以下命令，取得可安装的插件包。已有 `.tgz` 包可直接从第 2 步开始。
+```sh
+dsh plugin --profile web add dsh-codex-migration@0.4.1-beta.9
+```
 
-   ```sh
-   npm ci
-   npm pack
-   ```
+打开 DSH Web，点击侧边栏的 **Codex 迁移**。首次启动可运行 `dsh web`；如果侧边栏尚未出现入口，到「插件 → 已安装」中启用插件，按宿主提示重新加载或重启。
 
-2. 打开 DSH 的「插件 → 添加插件」，选择刚生成的 `dsh-codex-migration-<版本>.tgz` 并启用。使用命令行时，可运行 `dsh plugin --profile web add ./dsh-codex-migration-0.4.1-beta.8.tgz`，文件名以本次打包输出为准。
-3. 打开 DSH Web，在侧边栏找到「Codex 迁移」。首次启动可运行 `dsh web`。已运行的实例按宿主提示重新加载插件或重启；平时使用 `dsh-start` 管理的实例可用 `dsh-restart`。
+已验证宿主版本为 DSH `0.2.2-rc.1`，插件需要 Node.js 22.15 或更高版本。[npm 包页面](https://www.npmjs.com/package/dsh-codex-migration/v/0.4.1-beta.9)
 
 ## 第一次导入一个对话
 
@@ -84,6 +82,17 @@
 | `/codex-context cancel <选择ID>` | 取消本次准备 |
 
 </details>
+
+## 从源码构建
+
+在仓库根目录运行：
+
+```sh
+npm ci
+npm pack
+```
+
+在 DSH 的「插件 → 添加插件」中选择刚生成的 `.tgz` 文件并启用。
 
 开发、测试与提交约定见[贡献指南](AGENTS.md)。
 
